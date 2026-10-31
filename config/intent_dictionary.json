@@ -1,0 +1,578 @@
+{
+  "version": 1,
+  "description": "Editable intent keywords and dialog text for Study Buddy. Add synonyms here; do not edit app/intent_router.py for ordinary vocabulary changes.",
+  "yes_phrases": [
+    "yes",
+    "yeah",
+    "yep",
+    "yup",
+    "sure",
+    "okay",
+    "ok",
+    "correct",
+    "do it",
+    "please do"
+  ],
+  "no_phrases": [
+    "no",
+    "nope",
+    "nah",
+    "not now",
+    "don't",
+    "do not",
+    "cancel",
+    "no need",
+    "not interested"
+  ],
+  "cancel_phrases": [
+    "cancel",
+    "cancel it",
+    "never mind",
+    "nevermind",
+    "forget it",
+    "stop"
+  ],
+  "time_indicators": [
+    "second",
+    "seconds",
+    "sec",
+    "secs",
+    "minute",
+    "minutes",
+    "min",
+    "mins",
+    "hour",
+    "hours",
+    "hr",
+    "hrs",
+    "day",
+    "days",
+    "week",
+    "weeks",
+    "tomorrow",
+    "today",
+    "tonight",
+    "am",
+    "pm",
+    "at"
+  ],
+  "global_exclusions": [
+    "what is a reminder",
+    "what is reminder",
+    "what are reminders",
+    "define reminder",
+    "explain reminder",
+    "what is a timer",
+    "what is pomodoro",
+    "explain task management",
+    "what is a task",
+    "i do not want a reminder",
+    "i don't want a reminder",
+    "i don't need a reminder",
+    "no reminder needed",
+    "do not set a reminder",
+    "don't set a reminder",
+    "cancel my reminder",
+    "cancel reminder",
+    "how does the reminder work",
+    "how do reminders work",
+    "tell me about reminders",
+    "what does complete task mean",
+    "how to complete a task",
+    "what is task completion"
+  ],
+  "intents": [
+    {
+      "id": "complete_task",
+      "label": "mark an existing task as complete",
+      "keyword_groups": [
+        [
+          "task",
+          "tasks",
+          "todo",
+          "to-do",
+          "assignment"
+        ],
+        [
+          "complete",
+          "completed",
+          "finish",
+          "finished",
+          "done",
+          "mark as complete",
+          "mark complete",
+          "mark done"
+        ]
+      ],
+      "exclude_phrases": [
+        "what is a task",
+        "how do i complete",
+        "how to complete",
+        "task completed means",
+        "i completed my assignment yesterday",
+        "what was the task i completed",
+        "what task did i complete",
+        "what tasks have i completed",
+        "which task did i complete",
+        "how many tasks have i completed",
+        "show completed tasks",
+        "list completed tasks",
+        "my completed tasks"
+      ],
+      "direct_patterns": [
+        "(?i)\\b(?:complete|finish|done with)\\s+(?:the\\s+)?task\\s*[:=\\-]\\s*\\S+",
+        "(?i)\\b(?:complete|finish)\\s+(?:the\\s+)?task\\s+.+",
+        "(?i)\\bmark\\s+as\\s+complete\\s*[:=\\-]\\s*\\S+",
+        "(?i)\\bmark\\s+(?:the\\s+)?task\\s+.+\\s+(?:complete|done)\\b",
+        "(?i)\\b(?:complete|finish)\\s+(?:this|that|the last)\\s+task\\b",
+        "(?i)\\bmark\\s+as\\s+complete\\s+whatever\\s+in\\s+my\\s+tasks\\b"
+      ],
+      "confirm_prompt": "It sounds like you may want to mark an existing task as complete. Is that right? Reply YES or NO.",
+      "details_prompt": "Here are your open tasks. Reply with a number or the exact task title you want to complete.",
+      "no_items_prompt": "You don't have any open tasks to complete.",
+      "retry_prompt": "I couldn't match that to one open task. Reply with the number or exact task title shown above, or say CANCEL.",
+      "help_example": "Finish / mark complete + task title"
+    },
+    {
+      "id": "add_task",
+      "label": "add a task",
+      "keyword_groups": [
+        [
+          "add",
+          "create",
+          "make",
+          "put",
+          "save",
+          "include",
+          "jot down"
+        ],
+        [
+          "task",
+          "tasks",
+          "todo",
+          "to-do",
+          "task list"
+        ]
+      ],
+      "exclude_phrases": [
+        "what is a task",
+        "how to add tasks",
+        "how do i add a task",
+        "don't add a task",
+        "do not add a task",
+        "not add a task"
+      ],
+      "direct_patterns": [
+        "(?i)\\b(?:add|create|make|put|save)\\s+(?:a\\s+|the\\s+)?(?:task|todo|to-do)\\s*[:=\\-]\\s*\\S+",
+        "(?i)\\b(?:add|create|make|put|save)\\s+(?:a\\s+|the\\s+)?(?:task|todo|to-do)\\s+(?:called|named|to|for)\\s+\\S+",
+        "(?i)\\b(?:add|put|save)\\s+.+\\s+(?:to|on|in|into)\\s+(?:my\\s+)?(?:task list|tasks|todo list|to-do list)\\b",
+        "(?i)\\b(?:add|create)\\s+(?:the\\s+)?task\\s+.+",
+        "(?i)\\b(?:add|put|save)\\s+(?:it\\s+)?(?:to|in|into)\\s+(?:my\\s+)?(?:task|tasks|task list|todo list|to-do list)\\s*[:=\\-]\\s*\\S+"
+      ],
+      "confirm_prompt": "It sounds like you may want to add a task. Is that right? Reply YES or NO.",
+      "details_prompt": "What task should I add? You can include an optional due date. Example: Finish physics assignment; due 2026-10-27 17:00. The due date must use YYYY-MM-DD or YYYY-MM-DD HH:MM.",
+      "retry_prompt": "Please send the task title, optionally followed by '; due YYYY-MM-DD HH:MM', or say CANCEL.",
+      "help_example": "Finish physics assignment; due 2026-10-27 17:00"
+    },
+    {
+      "id": "set_reminder",
+      "label": "set a reminder",
+      "keyword_groups": [
+        [
+          "set",
+          "create",
+          "make",
+          "add",
+          "remind me",
+          "nudge me",
+          "notify me",
+          "need",
+          "want",
+          "would like",
+          "can you",
+          "could you",
+          "please remind"
+        ],
+        [
+          "reminder",
+          "reminders",
+          "remind",
+          "remind me",
+          "nudge",
+          "nudge me",
+          "notify",
+          "notification"
+        ]
+      ],
+      "exclude_phrases": [
+        "what is a reminder",
+        "what is reminder",
+        "what are reminders",
+        "define reminder",
+        "explain reminder",
+        "how do reminders work",
+        "tell me about reminders",
+        "cancel reminder",
+        "cancel my reminder",
+        "you can set reminders also",
+        "you can set reminders too",
+        "you can set reminders",
+        "you set reminders also",
+        "you also set reminders",
+        "reminders are also supported",
+        "you have reminders too",
+        "i know you can set reminders",
+        "you can remind me too"
+      ],
+      "direct_patterns": [
+        "(?i)\\b(?:remind me|nudge me)\\b.*\\b(?:in|after)\\s+\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\\b",
+        "(?i)\\b(?:remind me|nudge me)\\b.*\\b(?:today|tomorrow|tonight)\\b",
+        "(?i)\\b(?:set|create|make|add)\\s+(?:a\\s+)?reminder\\b.*\\b(?:\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)|today|tomorrow|at\\s+\\d)",
+        "(?i)\\b(?:remind me|nudge me|give me a nudge|send me a reminder)\\b.*\\b(?:in|after)\\s+(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty|sixty|ninety|a)\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\\b",
+        "(?i)\\b(?:give|send|set|create|make)\\b.*\\b(?:reminder|nudge|notification)\\b.*\\b(?:in|after)\\s+(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty|sixty|ninety|a)\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\\b"
+      ],
+      "confirm_prompt": "It sounds like you may want to set a reminder. Is that right? Reply YES or NO.",
+      "details_prompt": "What should I remind you about? For example, drink water.",
+      "missing_time_prompt": "How long from now should I remind you? For example, in 20 minutes or tomorrow at 9 AM.",
+      "retry_prompt": "Please include what to remind you about and a time, for example: 'Remind me in 20 minutes to drink water', or say CANCEL.",
+      "help_example": "Remind me in 20 minutes to drink water"
+    },
+    {
+      "id": "start_timer",
+      "label": "start a timer or focus session",
+      "keyword_groups": [
+        [
+          "timer",
+          "countdown",
+          "pomodoro",
+          "focus timer",
+          "focus session"
+        ],
+        [
+          "start",
+          "set",
+          "begin",
+          "run",
+          "need",
+          "want",
+          "would like",
+          "can you",
+          "could you"
+        ]
+      ],
+      "exclude_phrases": [
+        "what is a timer",
+        "what is pomodoro",
+        "explain pomodoro",
+        "how does a timer work",
+        "cancel timer",
+        "stop the timer"
+      ],
+      "direct_patterns": [
+        "(?i)\\b(?:start|set|begin|run)\\b.*\\b(?:timer|countdown|pomodoro|focus session)\\b"
+      ],
+      "confirm_prompt": "It sounds like you may want to start a timer or focus session. Is that right? Reply YES or NO.",
+      "details_prompt": "How long should the timer run? Example: 25 minutes, 45 minutes, or 1 hour 20 minutes.",
+      "retry_prompt": "Please give me a timer duration, such as '25 minutes' or '1 hour 20 minutes', or say CANCEL.",
+      "help_example": "Start a 25-minute focus timer"
+    }
+  ],
+  "time_patterns": [
+    "\\b\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\\b",
+    "\\b(?:today|tomorrow|tonight)\\b",
+    "\\bat\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?\\b"
+  ],
+  "time_leading_phrases": [
+    "in",
+    "after",
+    "tomorrow",
+    "today",
+    "tonight",
+    "at"
+  ],
+  "tool_route_hints": {
+    "get_capabilities": {
+      "phrases": [
+        "what can you do",
+        "what are your capabilities",
+        "what tools do you have",
+        "list your tools",
+        "show capabilities",
+        "what features do you have",
+        "what can buddy do",
+        "what can milo do",
+        "what can pixel do",
+        "what things can you do"
+      ]
+    },
+    "get_user_profile": {
+      "phrases": [
+        "what is my name",
+        "what's my name",
+        "what do you know about me",
+        "what things do you know about me",
+        "show my profile",
+        "tell me about my profile",
+        "what do you remember about me",
+        "what do you know about me personally"
+      ]
+    },
+    "search_memory": {
+      "phrases": [
+        "previous chats",
+        "past conversations",
+        "earlier conversation",
+        "what did we discuss",
+        "what did i tell you",
+        "what did i say before",
+        "search my memory",
+        "what were we talking about",
+        "what do you remember about",
+        "what was i working on before",
+        "find in my notes",
+        "tell me about our previous chats",
+        "previous conversation",
+        "previous conversations",
+        "past chat",
+        "past chats",
+        "what did we talk about",
+        "what was our last conversation about"
+      ]
+    },
+    "save_memory": {
+      "phrases": [
+        "remember that",
+        "save this note",
+        "keep a note that",
+        "write this down",
+        "save to memory",
+        "store this fact",
+        "make a note that"
+      ]
+    },
+    "add_task": {
+      "phrases": [
+        "add a task",
+        "add task",
+        "create a task",
+        "create task",
+        "put this on my task list",
+        "add this to my tasks",
+        "add this task",
+        "save task"
+      ],
+      "keyword_groups": [
+        [
+          "add",
+          "create",
+          "make",
+          "put",
+          "save",
+          "jot down"
+        ],
+        [
+          "task",
+          "tasks",
+          "todo",
+          "to-do",
+          "assignment",
+          "to do list"
+        ]
+      ]
+    },
+    "list_tasks": {
+      "phrases": [
+        "show my tasks",
+        "show tasks",
+        "list my tasks",
+        "list tasks",
+        "how many tasks",
+        "count my tasks",
+        "completed tasks",
+        "list completed tasks",
+        "show completed tasks",
+        "what was the task i completed",
+        "what task did i complete",
+        "what tasks have i completed",
+        "which task did i complete",
+        "how many tasks have i completed",
+        "my task history",
+        "what tasks do i have",
+        "show how many tasks",
+        "how many tasks have i had",
+        "how many tasks do i have",
+        "my completed tasks",
+        "task history"
+      ],
+      "keyword_groups": [
+        [
+          "task",
+          "tasks",
+          "todo",
+          "to-do",
+          "assignment"
+        ],
+        [
+          "show",
+          "list",
+          "count",
+          "how many",
+          "completed",
+          "history",
+          "what tasks",
+          "which task"
+        ]
+      ]
+    },
+    "complete_task": {
+      "phrases": [
+        "complete the task",
+        "complete task",
+        "mark as complete",
+        "mark task complete",
+        "mark it as done",
+        "finish this task",
+        "finish the task",
+        "complete this task",
+        "mark this task complete",
+        "mark complete",
+        "mark done"
+      ],
+      "keyword_groups": [
+        [
+          "complete",
+          "finish",
+          "mark as done",
+          "mark as complete"
+        ],
+        [
+          "task",
+          "tasks",
+          "todo",
+          "to-do",
+          "assignment"
+        ]
+      ],
+      "exclude_phrases": [
+        "what was the task i completed",
+        "what task did i complete",
+        "what tasks have i completed",
+        "which task did i complete",
+        "how many tasks have i completed",
+        "show completed tasks",
+        "list completed tasks",
+        "my completed tasks",
+        "what was our last task"
+      ]
+    },
+    "delete_task": {
+      "phrases": [
+        "delete task",
+        "delete the task",
+        "remove task",
+        "remove the task",
+        "delete this task"
+      ]
+    },
+    "create_reminder": {
+      "phrases": [
+        "remind me",
+        "set a reminder",
+        "set reminder",
+        "create a reminder",
+        "create reminder",
+        "nudge me",
+        "notify me",
+        "set a reminder for me",
+        "can you set a reminder",
+        "would you remind me",
+        "nudge me in"
+      ]
+    },
+    "list_reminders": {
+      "phrases": [
+        "show my reminders",
+        "list my reminders",
+        "what reminders do i have",
+        "pending reminders",
+        "when are my reminders"
+      ]
+    },
+    "start_timer": {
+      "phrases": [
+        "start a timer",
+        "start timer",
+        "set a timer",
+        "set timer",
+        "start pomodoro",
+        "focus timer",
+        "start a focus session",
+        "begin a countdown",
+        "start a timer for",
+        "set a timer for",
+        "timer for"
+      ]
+    },
+    "get_camera_status": {
+      "phrases": [
+        "can you see me",
+        "can you see my face",
+        "is your camera on",
+        "camera status",
+        "are you using the camera",
+        "look at me"
+      ]
+    },
+    "get_desktop_context": {
+      "phrases": [
+        "what am i doing",
+        "what am i watching",
+        "what am i viewing",
+        "what is on my current tab",
+        "what's on my current tab",
+        "current tab title",
+        "active window title",
+        "what is my window title",
+        "what is open on my computer",
+        "what is in the window i am viewing",
+        "what am i doing right now",
+        "what am i doing after",
+        "what title is my current tab",
+        "can you see the title of my tab",
+        "read the title of my window",
+        "what am i looking at right now"
+      ]
+    },
+    "speak_text": {
+      "phrases": [
+        "read this aloud",
+        "read it aloud",
+        "speak this",
+        "say this out loud",
+        "read this to me"
+      ]
+    }
+  },
+  "tool_route_fallback_patterns": [
+    "\\b(?:please\\s+)?(?:add|create|make|put|save|jot down)\\b.*\\b(?:task|tasks|todo|to-do|note|memory)\\b",
+    "\\b(?:please\\s+)?(?:complete|finish|mark as complete|mark as done|delete|remove)\\b.*\\b(?:task|tasks|todo|to-do|assignment)\\b",
+    "\\b(?:please\\s+)?(?:set|create|make|add)\\b.*\\b(?:reminder|notification)\\b",
+    "\\b(?:please\\s+)?(?:start|begin|set|run)\\b.*\\b(?:timer|pomodoro|countdown|focus session)\\b",
+    "\\b(?:show|list|count|how many|find|search)\\b.*\\b(?:tasks|reminders|notes|conversations|memory)\\b",
+    "\\b(?:what did we discuss|what do you know about me|previous chats|past conversations|current tab|what am i doing)\\b"
+  ],
+  "skip_phrases": [
+    "skip",
+    "pass",
+    "not now",
+    "later"
+  ],
+  "initiative_feedback_phrases": [
+    "why did you message me",
+    "not helpful",
+    "less often",
+    "stop these",
+    "leave me alone",
+    "not now"
+  ]
+}

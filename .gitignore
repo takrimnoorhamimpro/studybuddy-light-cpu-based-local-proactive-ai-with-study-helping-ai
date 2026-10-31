@@ -1,0 +1,26 @@
+# Per-user data and local runtime telemetry
+/users/
+/logs/
+
+# Downloaded local models (install_camera.bat can fetch the optional FER+ model)
+/models/
+
+# Machine-local PowerShell cache
+/Microsoft/
+
+# Python bytecode, virtual environments, and test/tool caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Local databases, encrypted backups, and temporary files
+*.db
+*.sqlite
+*.sqlite3
+*.sbbak
+*.tmp

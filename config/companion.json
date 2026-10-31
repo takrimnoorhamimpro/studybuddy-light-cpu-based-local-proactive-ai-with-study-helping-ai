@@ -1,0 +1,57 @@
+{
+  "persona_budget_tokens": 200,
+  "max_injected_items": 4,
+  "relevance_min_overlap": 0.12,
+  "always_on_preference_items": 2,
+  "consent_idle_seconds": 120,
+  "consent_prompt_cooldown_seconds": 1800,
+  "consent_daily_cap": 3,
+  "candidate_queue_max": 5,
+  "ttl_days_by_kind": {
+    "deadline": 45,
+    "area": 45,
+    "goal": 90,
+    "schedule": 90,
+    "preference": null,
+    "interest": null
+  },
+  "rejected_cooldown_days": 90,
+  "response_modes": {
+    "quick": 20,
+    "chat": 56,
+    "deep": 96
+  },
+  "prompt_token_limit": 1300,
+  "initiative_quiet_default": "23:00-07:00",
+  "loop_escalation_days": [
+    3,
+    1,
+    0
+  ],
+  "loop_morning_default": "09:00",
+  "trigger_base_value": {
+    "open_loop_due": 1.0,
+    "usual_study_start": 0.7,
+    "session_return": 0.35,
+    "wind_down": 0.2,
+    "title_clue": 1.0
+  },
+  "trigger_threshold": 0.05,
+  "acceptance_floor": 0.15,
+  "ignore_window_minutes": 15,
+  "reply_window_minutes": 10,
+  "events_retention_days": 90,
+  "rhythm_half_life_days": 14,
+  "rhythm_min_days": 5,
+  "rhythm_min_minutes": 30,
+  "daily_cap_default": 0,
+  "trigger_cooldown_minutes": {
+    "open_loop_due": 0,
+    "usual_study_start": 1380,
+    "session_return": 1380,
+    "wind_down": 1380,
+    "title_clue": 0
+  },
+  "annoyance_per_nudge": 0.08,
+  "annoyance_per_ignore": 0.12
+}

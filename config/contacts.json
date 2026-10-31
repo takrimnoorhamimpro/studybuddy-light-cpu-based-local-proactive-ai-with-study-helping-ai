@@ -1,0 +1,18 @@
+{
+  "_note": "Only YOU edit this file. Fill in real, VERIFIED numbers. The AI never makes up phone numbers. Empty fields are simply skipped.",
+  "university_counsellor": {
+    "name": "Segi University counsellor",
+    "phone": "",
+    "email": ""
+  },
+  "emergency_and_helplines": [
+    {
+      "name": "Local emergency number (Malaysia)",
+      "number": ""
+    },
+    {
+      "name": "Mental health helpline (verify before adding)",
+      "number": ""
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "_note": "FIXED SAFETY RULES. Not editable by the owner or by training. Only contacts.json is editable.",
+
+  "prompt_core": "SAFETY: AI, not human, doctor, or therapist. Never encourage suicide or self-harm. Be honest, kind, and non-pressuring; admit uncertainty and limits. Encourage trusted people or professional help when needed.",
+  "prompt_language": "LANGUAGE: English only; usually 1–2 short sentences.",
+
+  "input_high": [
+    "\\bkill(ing)?\\s*my\\s*self\\b",
+    "\\bend(ing)? my (own )?life\\b",
+    "\\btake my own life\\b",
+    "\\bend it all\\b",
+    "\\bsuicid(e|al)\\b",
+    "\\b(want to|wanna|wish i could|like to|going to) die\\b",
+    "\\bi wish i (was|were) dead\\b",
+    "\\bwish i (wasn'?t|was not|were not) alive\\b",
+    "\\bwish i (never|would not|wouldn'?t) wake up\\b",
+    "\\b(don'?t|dont|do not|no longer) want to (live|be alive|be here|exist)\\b",
+    "\\bno reason to (live|go on|be alive)\\b",
+    "\\b(life is|life'?s) not worth living\\b",
+    "\\bbetter off without me\\b",
+    "\\b(hurt|harm|cut|cutting|hurting|harming) my\\s*self\\b",
+    "\\bself[- ]?harm\\b",
+    "\\bmorte chai\\b",
+    "\\bmorei jete chai\\b",
+    "\\b(ar|aar) bachte chai na\\b",
+    "\\bnijeke shesh\\b",
+    "\\batmohotta\\b"
+  ],
+
+  "input_medium": [
+    "\\bhopeless\\b",
+    "\\bworthless\\b",
+    "\\bcan'?t (go on|take it|take this|do this) anymore\\b",
+    "\\bcannot (go on|take it|take this|do this) anymore\\b",
+    "\\bwant to disappear\\b",
+    "\\blife is pointless\\b",
+    "\\bno point (in )?(living|going on|anything)\\b"
+  ],
+
+  "output_block": [
+    "\\byou (should|ought to|could|can) (just )?(kill|hurt|harm|end) yourself\\b",
+    "\\b(it'?s|it is) (ok|okay|fine|understandable|reasonable) to (die|kill yourself|end your life|hurt yourself)\\b",
+    "\\byou'?re right to (want to )?(die|end it|end your life)\\b",
+    "\\bhere'?s how to (kill|hurt|harm)\\b",
+    "\\bthe (best|easiest|painless) way to (die|kill|end)\\b",
+    "\\bgo ahead and (die|end it|kill)\\b",
+    "\\bi(?: am|'m) (?:a |an |your )?(?:real )?(?:human|therapist|doctor|psychologist|psychiatrist)\\b",
+    "\\byou'?re (just )?overreacting\\b",
+    "\\bstop being (so )?(dramatic|sad)\\b"
+  ],
+
+  "reply_high_opening": "I'm really glad you told me. What you're feeling sounds very heavy, and I'm taking it seriously. I don't agree that dying or hurting yourself is the answer, because I think you matter. I'm staying right here with you. Are you safe right now?",
+  "reply_medium_opening": "That sounds really heavy, and I'm glad you said it out loud. I'm here and I'm listening. Do you want to tell me more about what's been going on? And just to be sure: are you safe right now?",
+  "people_line_with_names": "Is there someone like {names} you could reach out to right now? Please don't carry this alone.",
+  "people_line_ask": "Who is someone you feel comfortable talking to? I'd really like you to reach out to them today.",
+  "pro_line": "Talking to a counsellor or another professional can also help a lot, and it doesn't mean something is wrong with you.",
+  "helpline_intro": "If you think you might act on these thoughts, please contact one of these right now:",
+
+  "output_fallback": "I want to be careful and kind here. I'm not able to answer that the way I'd like to, but I'm still here with you. Can you tell me a little more about how you're feeling right now?"
+}
