@@ -123,6 +123,9 @@ class StudyBuddyApp:
         self._title_session_recap_last_shown_at = 0.0
         self._title_session_recap_batch_id = 0
         self._title_session_recap_active_id = 0
+        self._title_session_recap_timer_id = None
+        self._title_session_recap_timer_target = 0.0
+        self._pending_recap_interest = None
         self._active_chat_title_signature = None
         self._active_chat_title_context = None
         self._active_chat_title_user_text = ""
@@ -341,6 +344,12 @@ class StudyBuddyApp:
                 pass
 
     def _append(self, who, text, tag=None):
+        if who == "Buddy":
+            cleaner = getattr(getattr(self, "core", None), "strip_internal_skip_lines", None)
+            if callable(cleaner):
+                text = cleaner(text)
+            if not str(text or "").strip():
+                return
         self.chat.configure(state="normal")
         self.chat.insert("end", who + ": ", tag or ("you" if who=="You" else "buddy"))
         self.chat.insert("end", text.strip()+"\n\n")
@@ -476,6 +485,7 @@ class StudyBuddyApp:
         self.proactive_pause_flow.awaiting_until = 0.0
         if not enabled:
             self._cancel_background_llm_work(self._proactive_cancel_event)
+            self._pending_recap_interest = None
             self._phase2_nudge_queued = False
             self._phase2_rhythm_offer_queued = False
             builder = getattr(self.core, "relationship_builder", None)
@@ -492,6 +502,7 @@ class StudyBuddyApp:
         self.last_turn_completed_ts = self.last_interaction_ts
         self._last_entry_activity_ts = self.last_interaction_ts
         self._draw_proactive_availability_switch()
+        self._schedule_title_session_recap_deadline()
         label = "on" if enabled else "off"
         if announce:
             detail = (" Window-title check-ins are available too." if enabled and self.awareness_enabled
@@ -525,6 +536,7 @@ class StudyBuddyApp:
         self._has_user_chatted_this_session = True
         pause_notice = self._update_proactive_boundary_from_user(text)
         if self._pause_reply_only:
+            self._pending_recap_interest = None
             with self.intelligence_monitor.request_trace():
                 if voice_origin:
                     self.intelligence_monitor.mark_flow_node("voice")
@@ -533,7 +545,15 @@ class StudyBuddyApp:
                 )
                 self._finish_pause_flow_turn(text, pause_notice)
                 self.intelligence_monitor.finish(event_id, "success")
+            self._schedule_title_session_recap_deadline()
             return
+        if self._pending_recap_interest:
+            if self._handle_recap_interest_confirmation(text):
+                return
+            # A different request starts a normal conversation; don't let a later
+            # bare "yes" accidentally confirm an old recap suggestion.
+            self._pending_recap_interest = None
+            self._schedule_title_session_recap_deadline()
         with self.intelligence_monitor.request_trace():
             camera_command_handled = self._handle_camera_chat_command(text)
             if camera_command_handled:
@@ -821,10 +841,14 @@ class StudyBuddyApp:
                     # New events carry app/category so rate limits remain stable even
                     # when a browser changes its title for every page/video.
                     _, text, *context_parts = item
+                    text = self.core.strip_internal_skip_lines(text)
                     app_name = context_parts[0] if len(context_parts) > 0 else "unknown"
                     category = context_parts[1] if len(context_parts) > 1 else "Other"
                     decision = context_parts[2] if len(context_parts) > 2 else None
                     self.proactive_worker_running = False
+                    if not text:
+                        self._release_title_checkin_attempt(decision)
+                        continue
                     is_title_checkin = bool(decision and getattr(decision, "trigger", None) == "title_clue")
                     # A just-arrived user request wins; never inject a proactive
                     # message into the middle of the interactive response.
@@ -945,11 +969,10 @@ class StudyBuddyApp:
                     self._title_session_recap_worker_running = False
                     self._title_session_recap_active_id = 0
                     self.proactive_worker_running = False
-                    interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
-                    self._title_session_recap_retry_at = (
-                        0.0 if reason == "User chat took priority."
-                        else time.time() + min(120, max(30, interval * 15))
-                    )
+                    self._title_session_recap_retry_at = time.time() + (
+                        1 if reason == "User chat took priority." else 5)
+                    self._schedule_title_session_recap_deadline(
+                        delay_ms=500 if reason == "User chat took priority." else 5000)
                     if not self.busy and reason != "User chat took priority.":
                         if reason == "No useful recap could be made.":
                             self._status("The local model could not form a clear recap; the same batch will retry shortly.")
@@ -962,20 +985,29 @@ class StudyBuddyApp:
                     self._title_session_recap_worker_running = False
                     self._title_session_recap_active_id = 0
                     self.proactive_worker_running = False
+                    summary = str(text.get("summary") or "").strip() if isinstance(text, dict) else str(text or "").strip()
+                    summary = self.core.strip_internal_skip_lines(summary)
+                    interest_candidate = str(text.get("interest_candidate") or "").strip() if isinstance(text, dict) else ""
+                    if not summary:
+                        self._title_session_recap_retry_at = time.time() + 5
+                        self._schedule_title_session_recap_deadline()
+                        continue
                     router = getattr(self.core, "intent_router", None)
                     interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
-                    latest_chat_activity = max(float(self.last_interaction_ts or 0),
-                        float(self.last_turn_completed_ts or 0), float(self._last_entry_activity_ts or 0))
-                    chat_started_during_recap = latest_chat_activity > self._title_session_recap_attempt_at
-                    if (self.busy or chat_started_during_recap or self._proactive_cancel_event.is_set() or not interval
+                    latest_sent_chat = max(float(self.last_interaction_ts or 0),
+                        float(self.last_turn_completed_ts or 0))
+                    chat_started_during_recap = latest_sent_chat > self._title_session_recap_attempt_at
+                    user_is_typing = time.time() - float(self._last_entry_activity_ts or 0) < 2
+                    if (self.busy or chat_started_during_recap or user_is_typing
+                            or self._proactive_cancel_event.is_set() or not interval
                             or not self.settings.get("proactive_enabled", True)
-                            or not self._proactive_chat_is_quiet()
                             or not self.awareness_enabled or self.proactive_pause_flow.is_paused(time.time())
                             or self.proactive_pause_flow.awaiting_duration
                             or self._is_quiet(datetime.datetime.now().strftime("%H:%M"))
                             or (router and router.has_pending)
                             or (self.core.relationship_builder and self.core.relationship_builder.phase)):
-                        self._title_session_recap_retry_at = 0.0
+                        self._title_session_recap_retry_at = time.time() + (5 if user_is_typing else 1)
+                        self._schedule_title_session_recap_deadline()
                         continue
                     try:
                         current = self.context_engine.observe(self._idle_seconds())
@@ -983,10 +1015,17 @@ class StudyBuddyApp:
                     except Exception:
                         current_safe = {}
                     if current_safe.get("private_context") or current_safe.get("app_category") in ("Private", "Meeting"):
-                        self._title_session_recap_retry_at = 0.0
+                        self._title_session_recap_retry_at = time.time() + 5
+                        self._schedule_title_session_recap_deadline()
                         continue
                     self._title_session_recap_last_shown_at = time.time()
                     del self._title_session_events[:max(0, min(len(self._title_session_events), int(batch_count)))]
+                    if interest_candidate:
+                        text = (summary + "\n\nWould you like me to add “" + interest_candidate
+                                + "” as an interest in My World? Reply yes or no.")
+                    else:
+                        text = summary
+                    self._pending_recap_interest = interest_candidate or None
                     self.core.pending_proactive_context = text
                     self.core.pending_proactive_kind = "title_session_recap"
                     self.core.pending_proactive_window_title = None
@@ -1003,6 +1042,8 @@ class StudyBuddyApp:
                     if self.root.state() == "withdrawn" and self.tray_icon:
                         try: self.tray_icon.notify(text[:180], "Study Buddy")
                         except Exception: pass
+                    self._title_session_recap_retry_at = 0.0
+                    self._schedule_title_session_recap_deadline()
                 elif kind == "set_chat_timer":
                     _, seconds, label = item
                     timer_event = self.intelligence_monitor.start(
@@ -1643,7 +1684,7 @@ class StudyBuddyApp:
         summary_row=ttk.Frame(frame); summary_row.pack(fill="x",pady=2)
         ttk.Label(summary_row,text="Recap window-related chats every (minutes; 0 = off)").pack(side="left")
         ttk.Spinbox(summary_row,from_=0,to=1440,textvariable=title_session_summary,width=6).pack(side="left",padx=8)
-        ttk.Label(frame,text="The interval starts with the first collected window chat; a recap waits until the local model is free and no chat is being answered.",wraplength=620).pack(anchor="w",pady=(1,5))
+        ttk.Label(frame,text="The timer starts with the first window check-in in a batch. At the interval, Luna prepares a local recap and shows it as soon as the model and chat are free. A topic is added to My World only if you answer yes.",wraplength=620).pack(anchor="w",pady=(1,5))
         ttk.Label(frame,text="Mouse and keyboard activity do not reset the window timer. Repeat gaps grow after unanswered check-ins and return to the selected interval when you reply.",wraplength=620).pack(anchor="w",pady=(1,5))
         trigger_vars={}
         for trigger,label in (("open_loop_due","Deadline nudges"),("usual_study_start","Usual study-time nudges"),("session_return","Session-return check-ins"),("wind_down","Wind-down notes"),("title_clue","Window-title check-ins")):
@@ -1804,6 +1845,7 @@ class StudyBuddyApp:
             self.camera_policy.enabled = webcam_enabled.get()
             self.camera_policy.minimum_interval_minutes = camera_cooldown_value
             was = self.awareness_enabled; self.awareness_enabled = awareness.get()
+            self._schedule_title_session_recap_deadline()
             if self.awareness_enabled and not was: self._start_awareness()
             self._apply_autostart(autostart.get())
             self._status("Settings saved. RAM keep-alive changes apply to the next model request; model name changes apply after restart.")
@@ -2649,7 +2691,72 @@ class StudyBuddyApp:
         self._draw_proactive_availability_switch()
         if mentions_closed_task(text):
             self.closed_task_reminder = (text or "").strip()[:240]
+        self._schedule_title_session_recap_deadline()
         return notice
+
+    def _handle_recap_interest_confirmation(self, user_text):
+        """Save the recap's proposed interest only after a clear yes."""
+        candidate = str(self._pending_recap_interest or "").strip()
+        if not candidate:
+            return False
+        normalized = re.sub(r"\s+", " ", str(user_text or "").strip().casefold())
+        normalized = normalized.strip(" \t\r\n.!?,;:")
+        affirmative = bool(re.match(
+            r"^(?:yes|yeah|yep|yup|sure|absolutely|please do|add it|save it|add that|save that)(?:\b|$)",
+            normalized,
+        ))
+        negative = bool(re.match(
+            r"^(?:no|nope|nah|not now|not yet|don't|do not|skip|leave it|don't add|do not add)(?:\b|$)",
+            normalized,
+        ))
+        if re.search(r"\b(?:don't add|do not add|don't save|do not save|not interested|not now|not yet)\b", normalized):
+            affirmative = False
+            negative = True
+        if not affirmative and not negative:
+            return False
+
+        self._pending_recap_interest = None
+        if getattr(self.core, "pending_proactive_kind", None) == "title_session_recap":
+            self.core.pending_proactive_context = None
+            self.core.pending_proactive_kind = None
+            self.core.pending_proactive_window_title = None
+            self.core.pending_proactive_app_name = None
+            self.core.pending_proactive_app_category = None
+            self.core.pending_proactive_observed_at = None
+
+        if negative:
+            reply = "Okay, I won't add that to My World."
+        else:
+            facts_enabled = str(self.personal_companion.setting("tier_facts", "1")).lower() not in (
+                "0", "false", "off", "no")
+            try:
+                from companion.sensitive import is_instruction_like, is_sensitive
+                safe_candidate = " ".join(self.core.safety.safe_output(candidate).split()).strip(" .,!;:")[:100]
+                if (not facts_enabled or not safe_candidate
+                        or is_sensitive(safe_candidate) or is_instruction_like(safe_candidate)):
+                    reply = "I couldn't add that topic to My World, so nothing was saved."
+                else:
+                    self.personal_companion.add_fact(
+                        "The user is interested in " + safe_candidate,
+                        kind="interest",
+                        evidence="The user explicitly replied yes to saving this recap topic as an interest.",
+                        confirmed=True,
+                        consented=True,
+                        source="conversation",
+                        sensitivity="normal",
+                        importance=0.6,
+                    )
+                    reply = f"Added {safe_candidate} to your interests in My World."
+            except Exception:
+                reply = "I couldn't save that in My World just now; nothing was added."
+
+        self.core._remember(user_text, reply)
+        self.last_turn_completed_ts = time.time()
+        self.last_reply = reply
+        self._append("Buddy", reply, "buddy")
+        self._status("Interest saved to My World" if affirmative and "Added " in reply else "Interest confirmation handled")
+        self._schedule_title_session_recap_deadline()
+        return True
 
     def _finish_pause_flow_turn(self, user_text, reply):
         """Display a deterministic pause choice/acknowledgement without an LLM call."""
@@ -2818,6 +2925,7 @@ class StudyBuddyApp:
                     "buddy": "",
                 })
                 del self._title_session_events[:-200]
+        self._schedule_title_session_recap_deadline()
         # Keep this temporary, in-memory cache bounded during long desktop sessions.
         if len(self._title_context_recent_exchange) > 30:
             oldest = min(
@@ -3061,6 +3169,7 @@ class StudyBuddyApp:
                 relationship_deferred = bool(builder and builder.deferred_this_session)
                 title_clue = bool(snapshot and usable_title and usable_title != "[title hidden for privacy]"
                     and not safe.get("private_context") and category not in ("Private", "Meeting")
+                    and not self.context_engine.is_non_user_facing_system_window(snapshot)
                     # Deferring getting-to-know-you questions must not silence
                     # independent, title-grounded curiosity about a new window.
                     # Explicit proactive pauses are enforced separately below.
@@ -3334,6 +3443,83 @@ class StudyBuddyApp:
         finally:
             self._memory_review_running = False
 
+    def _schedule_title_session_recap_deadline(self, *, delay_ms=None):
+        """Arm a deadline-based Tk timer for the next recap batch."""
+        root = getattr(self, "root", None)
+        if root is None or self.closing:
+            return
+        interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
+        if (not interval or not self._title_session_events
+                or self.proactive_pause_flow.awaiting_duration
+                or not self.settings.get("proactive_enabled", True)
+                or not self.awareness_enabled or not self.settings.get("awareness_enabled", True)):
+            if self._title_session_recap_timer_id is not None:
+                try:
+                    root.after_cancel(self._title_session_recap_timer_id)
+                except Exception:
+                    pass
+            self._title_session_recap_timer_id = None
+            self._title_session_recap_timer_target = 0.0
+            return
+        batch_started_at = min(float(item.get("at", 0)) for item in self._title_session_events)
+        deadline = max(batch_started_at + interval * 60,
+                       float(self._title_session_recap_retry_at or 0))
+        if (self._title_session_recap_timer_id is not None and abs(
+                deadline - float(self._title_session_recap_timer_target or 0)) < 0.05):
+            return
+        if self._title_session_recap_timer_id is not None:
+            try:
+                root.after_cancel(self._title_session_recap_timer_id)
+            except Exception:
+                pass
+        remaining_ms = max(1, int(round((deadline - time.time()) * 1000)))
+        if delay_ms is not None and deadline <= time.time():
+            remaining_ms = max(1, int(delay_ms))
+        self._title_session_recap_timer_target = deadline
+        self._title_session_recap_timer_id = root.after(
+            remaining_ms, lambda target=deadline: self._title_session_recap_deadline(target))
+
+    def _title_session_recap_deadline(self, target):
+        """Start a recap as soon as its configured interval expires and the app is safe."""
+        if abs(float(target or 0) - float(self._title_session_recap_timer_target or 0)) >= 0.05:
+            return
+        self._title_session_recap_timer_id = None
+        self._title_session_recap_timer_target = 0.0
+        if self.closing or not self._title_session_events:
+            return
+        now = time.time()
+        if not self._title_session_recap_due(now):
+            self._schedule_title_session_recap_deadline()
+            return
+        if (self.busy or self.proactive_worker_running or self._memory_review_running
+                or self._phase2_nudge_queued or self._phase2_rhythm_offer_queued
+                or self._consent_event_queued or self.camera_active or self.camera_consent_pending):
+            self._schedule_title_session_recap_deadline(delay_ms=1000)
+            return
+        pause_until = float(self.proactive_pause_flow.paused_until or 0)
+        if pause_until > now:
+            self._schedule_title_session_recap_deadline(
+                delay_ms=max(250, int((pause_until - now) * 1000)))
+            return
+        if self.proactive_pause_flow.awaiting_duration:
+            return
+        try:
+            snapshot = self.context_engine.observe(self._idle_seconds())
+            safe = snapshot.safe_summary()
+            category = str(safe.get("app_category") or "Other")
+            private = bool(safe.get("private_context"))
+        except Exception:
+            category, private = "Other", False
+        quiet = self._is_quiet(datetime.datetime.now().strftime("%H:%M"))
+        router = getattr(self.core, "intent_router", None)
+        started = self._maybe_start_title_session_recap(
+            now, category=category, private=private, quiet=quiet, router=router)
+        if not started and self._title_session_events:
+            # Keep the original deadline. Retry briefly after a busy chat, pending
+            # dialog, privacy-sensitive window, or another local model job.
+            retry_ms = 1000
+            self._schedule_title_session_recap_deadline(delay_ms=retry_ms)
+
     def _title_session_recap_due(self, now):
         interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
         if not interval or not self._title_session_events:
@@ -3343,7 +3529,7 @@ class StudyBuddyApp:
                 and now >= float(self._title_session_recap_retry_at or 0))
 
     def _maybe_start_title_session_recap(self, now, *, category="Other", private=False, quiet=False, router=None):
-        """Queue a recap when its interval expires and local chat/model work is idle."""
+        """Queue a recap at its deadline when the local model and chat are available."""
         interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
         if (not interval or not self._title_session_events or self._title_session_recap_worker_running
                 or self.proactive_worker_running or self._memory_review_running or self.busy
@@ -3352,7 +3538,6 @@ class StudyBuddyApp:
                 or not self.awareness_enabled or not self.settings.get("awareness_enabled", True)
                 or not self.settings.get("proactive_enabled", True)
                 or self.proactive_pause_flow.is_paused(now) or self.proactive_pause_flow.awaiting_duration
-                or not self._proactive_chat_is_quiet(now)
                 or quiet or private or category in ("Private", "Meeting")
                 or (router and router.has_pending)
                 or (self.core.relationship_builder and self.core.relationship_builder.phase)):
@@ -3367,16 +3552,24 @@ class StudyBuddyApp:
         self._title_session_recap_active_id = batch_id
         self._title_session_recap_worker_running = True
         self._title_session_recap_attempt_at = now
+        self._title_session_recap_retry_at = 0.0
+        if self._title_session_recap_timer_id is not None:
+            try:
+                self.root.after_cancel(self._title_session_recap_timer_id)
+            except Exception:
+                pass
+            self._title_session_recap_timer_id = None
+            self._title_session_recap_timer_target = 0.0
         self._proactive_cancel_event.clear()
         self.proactive_worker_running = True
         self._status("Preparing a short recap of your recent window chats quietly…")
         threading.Thread(
             target=self._title_session_recap_worker,
-            args=(batch, batch_id), daemon=True,
+            args=(batch, batch_id, interval), daemon=True,
         ).start()
         return True
 
-    def _title_session_recap_worker(self, entries, batch_id):
+    def _title_session_recap_worker(self, entries, batch_id, interval):
         text = ""
         try:
             with self.intelligence_monitor.request_trace():
@@ -3387,7 +3580,7 @@ class StudyBuddyApp:
                 )
                 try:
                     text = self.core.generate_title_session_recap(
-                        entries, cancel_event=self._proactive_cancel_event)
+                        entries, interval_minutes=interval, cancel_event=self._proactive_cancel_event)
                 except Exception:
                     self.intelligence_monitor.finish(
                         event_id, "failed", "Session recap generation details omitted for privacy",
@@ -3397,7 +3590,7 @@ class StudyBuddyApp:
                     self.intelligence_monitor.finish(event_id, "success")
             if self._proactive_cancel_event.is_set():
                 self.events.put(("title_session_recap_skipped", batch_id, "User chat took priority."))
-            elif text:
+            elif isinstance(text, dict) and str(text.get("summary") or "").strip():
                 self.events.put(("title_session_recap_reply", text, batch_id, len(entries)))
             else:
                 self.events.put(("title_session_recap_skipped", batch_id, "No useful recap could be made."))

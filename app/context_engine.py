@@ -22,6 +22,11 @@ _GENERIC_TITLE_WORDS = {
     "chatgpt", "openai",
 }
 
+_NON_USER_FACING_PROCESSES = {
+    "shellexperiencehost", "startmenuexperiencehost", "searchhost",
+    "textinputhost", "sihost", "dwm", "lockapp",
+}
+
 
 def _unicode_words(text):
     """Split titles using Unicode letters so non-English video/file names count."""
@@ -89,6 +94,18 @@ class ContextEngine:
         title = str(getattr(snapshot, "window_title", "") or "").casefold()
         return (any(token in process_name for token in ("python", "pythonw", "studybuddy", "study_buddy"))
                 and "study buddy" in title) or title.strip() in {"study buddy", "study buddy — intelligence center", "study buddy - intelligence center"}
+
+    @staticmethod
+    def is_non_user_facing_system_window(snapshot):
+        """Exclude Windows shell/overlay processes from unsolicited title guesses."""
+        if snapshot is None:
+            return False
+        if isinstance(snapshot, dict):
+            app_name = snapshot.get("app_name", "")
+        else:
+            app_name = getattr(snapshot, "app_name", "")
+        process_name = os.path.splitext(str(app_name or "").casefold())[0]
+        return process_name in _NON_USER_FACING_PROCESSES
 
     def last_external_summary(self, max_age_seconds=600):
         """Return a fresh, safe title snapshot from the last non-StudyBuddy window."""
