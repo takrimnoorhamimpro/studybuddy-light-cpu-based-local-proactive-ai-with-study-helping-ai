@@ -1388,6 +1388,9 @@ class StudyBuddyApp:
             _var = tk.StringVar(value=str(self.settings.get(_key, _default)))
             ttk.Spinbox(_row, from_=_low, to=_high, width=7, textvariable=_var).pack(side="right")
             timing_vars[_key] = (_var, _low, _high)
+        card_var = tk.BooleanVar(value=bool(self.settings.get("profile_card_enabled", True)))
+        ttk.Checkbutton(frame, text="Give the AI a short My World profile card (what you chose to share) in every reply",
+                        variable=card_var).pack(anchor="w", pady=2)
         llm_text = tk.BooleanVar(value=bool(self.settings.get("window_checkin_llm_text", True)))
         ttk.Checkbutton(frame, text="Let the AI write each window check-in in its own words (not a fixed template)",
                         variable=llm_text).pack(anchor="w", pady=2)
@@ -1535,7 +1538,10 @@ class StudyBuddyApp:
                     timing_values[_key] = _number
             except ValueError:
                 messagebox.showerror("Settings", "Window check-in timings must be whole numbers inside the allowed ranges.", parent=win); return
-            self.settings.update(timing_values, window_checkin_llm_text=bool(llm_text.get()))
+            self.settings.update(timing_values, window_checkin_llm_text=bool(llm_text.get()),
+                                 profile_card_enabled=bool(card_var.get()))
+            try: self.core.settings["profile_card_enabled"] = bool(card_var.get())
+            except Exception: pass
             try: cap_value=max(0,min(5,int(daily_cap.get())))
             except ValueError:
                 messagebox.showerror("Settings","Daily nudge cap must be a number from 0 to 5.",parent=win); return
@@ -2108,6 +2114,24 @@ class StudyBuddyApp:
         ttk.Button(side,text="Edit selected",command=edit_memory).pack(fill="x",pady=3)
         ttk.Button(side,text="Confirm selected",command=confirm_memory).pack(fill="x",pady=3)
         ttk.Button(side,text="Delete selected",command=delete_memory).pack(fill="x",pady=3)
+        def cleanup_memories():
+            from companion import memory_quality
+            try: found=memory_quality.find_low_quality(self.personal_companion)
+            except Exception as exc:
+                messagebox.showerror("Clean up", str(exc), parent=win); return
+            if not found:
+                messagebox.showinfo("Clean up", "Nothing to clean up. Every saved detail looks clear and useful.", parent=win); return
+            preview="\n".join(f"• {label[:70]}  ({reason})" for _id,label,reason in found[:8])
+            more=f"\n…and {len(found)-8} more" if len(found) > 8 else ""
+            if not messagebox.askyesno("Clean up low-quality memories",
+                    f"These {len(found)} saved detail(s) look like chat filler or half sentences:\n\n{preview}{more}\n\n"
+                    "Hide them from replies? (They stay in the database and are never used. Details you typed yourself are never touched.)",
+                    parent=win):
+                return
+            changed=memory_quality.clean_up(self.personal_companion,[item[0] for item in found])
+            refresh()
+            messagebox.showinfo("Clean up", f"{changed} detail(s) hidden. Add anything you care about again with 'Add memory'.", parent=win)
+        ttk.Button(side,text="Clean up low-quality details",command=cleanup_memories).pack(fill="x",pady=3)
         ttk.Separator(side).pack(fill="x",pady=6)
         ttk.Label(side,text="Patterns",font=("Segoe UI",10,"bold")).pack(anchor="w")
         pattern_text=tk.StringVar(value=self.core.rhythm_tracker.describe())

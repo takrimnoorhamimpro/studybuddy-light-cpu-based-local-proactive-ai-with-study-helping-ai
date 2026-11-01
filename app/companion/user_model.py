@@ -61,7 +61,7 @@ class UserModel:
         value = self.personal_companion.setting("tier_facts", "1")
         return str(value).strip().lower() not in {"0", "false", "off", "no"}
 
-    def persona_context(self, user_text: str, *, budget_tokens: int = 200, max_items: int = 4) -> PersonaContext:
+    def persona_context(self, user_text: str, *, budget_tokens: int = 200, max_items: int = 4, exclude_ids=None) -> PersonaContext:
         if not self.memory or not self._facts_enabled():
             return PersonaContext("", [], 0, False)
         query = _tokens(user_text)
@@ -82,7 +82,7 @@ class UserModel:
                 conditions.append("kind IN ('deadline','schedule') OR (kind='goal' AND (label LIKE '%goal%' OR label LIKE '%aim%' OR label LIKE '%want%' OR label LIKE '%target%' OR label LIKE '%finish%' OR label LIKE '%complete%' OR label LIKE '%learn%'))")
             terms=sorted(query)
             conditions.extend(["label LIKE ?" for _ in terms])
-            sql=("SELECT id,label,kind,expires_ts,updated_ts,importance FROM personal_nodes "
+            sql=("SELECT id,label,kind,expires_ts,updated_ts,importance,source,evidence FROM personal_nodes "
                  "WHERE status='confirmed' AND consented=1 AND COALESCE(sensitivity,'normal')='normal' AND ("
                  + " OR ".join(conditions) + ")")
             params=[f"%{term}%" for term in terms]
@@ -93,7 +93,11 @@ class UserModel:
         eligible=[]
         preferences=[]
         min_overlap=float(self.config.get("relevance_min_overlap", 0.12) or 0.12)
+        excluded={str(x) for x in (exclude_ids or [])}
+        from companion.memory_quality import low_quality_reason
         for row in rows:
+            if str(row["id"]) in excluded: continue      # already shown in the Profile Card
+            if low_quality_reason(row["label"], row["evidence"], row["kind"], row["source"]): continue
             expiry=row["expires_ts"]
             if expiry is not None and float(expiry) <= now: continue
             label=str(row["label"] or "")[:120]

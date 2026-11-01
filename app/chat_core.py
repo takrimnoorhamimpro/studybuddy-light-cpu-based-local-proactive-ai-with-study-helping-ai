@@ -30,6 +30,7 @@ from companion.user_model import UserModel, estimate_tokens
 from companion.extractor import extract as extract_candidates, extract_relationship_candidates
 from companion.response_mode import choose_mode
 from companion.prompt_budget import PromptBudget
+from intelligence.turn_trace import TurnTrace
 from companion.config import load_config as load_companion_config
 from companion.open_loops import OpenLoopTracker
 from companion.rhythm import RhythmTracker
@@ -85,6 +86,11 @@ class ChatCore:
         self.companion_config = load_companion_config(os.path.join(config_dir, "companion.json"))
         self.personal_companion = PersonalCompanion(memory) if memory else None
         self.user_model = UserModel(memory, self.personal_companion, self.companion_config) if memory else None
+        try:
+            from companion.profile_card import ProfileCard
+            self.profile_card = ProfileCard(memory, self.personal_companion) if memory else None
+        except Exception:
+            self.profile_card = None
         self.open_loop_tracker = OpenLoopTracker(memory, self.personal_companion, self.companion_config) if memory and self.personal_companion else None
         self.rhythm_tracker = RhythmTracker(memory, self.personal_companion, self.companion_config) if memory and self.personal_companion else None
         self.feedback_logger = FeedbackLogger(memory, self.companion_config) if memory else None
@@ -113,6 +119,8 @@ class ChatCore:
         self.desktop_context_provider = None
         # Attached by the desktop composition root. ChatCore remains independently testable.
         self.tool_orchestrator = None
+        self.trace = TurnTrace()       # live per-message timing, shown in the Intelligence Center
+        self._trace_prompt_ms = 0.0
         self.tool_registry = None
         self.last_created_task_id = None
         self.last_task_snapshot = []
@@ -438,7 +446,23 @@ class ChatCore:
         if "options" in params: kwargs["options"] = options
         return method(messages, **kwargs)
 
-    def _ask_model(self, user_text, extra_care=False, on_token=None, use_tools=True, extra_system=""):
+    def _ask_model(self, *args, **kwargs):
+        """Timed wrapper: records the AI-model step (and its Ollama counters) in the live trace."""
+        started = time.perf_counter()
+        self._trace_prompt_ms = 0.0
+        try:
+            return self._ask_model_impl(*args, **kwargs)
+        finally:
+            total = (time.perf_counter() - started) * 1000
+            metrics = dict(getattr(self.llm, "last_metrics", {}) or {})
+            self.trace.step("AI model", max(0.0, total - float(self._trace_prompt_ms or 0.0)),
+                            prompt_tokens=metrics.get("prompt_tokens"), prompt_eval_ms=metrics.get("prompt_eval_ms"),
+                            generated_tokens=metrics.get("generated_tokens"),
+                            tokens_per_second=metrics.get("tokens_per_second"), load_ms=metrics.get("load_ms"),
+                            done_reason=metrics.get("done_reason"))
+
+    def _ask_model_impl(self, user_text, extra_care=False, on_token=None, use_tools=True, extra_system=""):
+        _t_ask = time.perf_counter()
         facts, notes = None, None
         response_mode = choose_mode(user_text, self.history)
         response_options = {"num_predict": int((self.companion_config.get("response_modes") or {}).get(response_mode, 110))}
@@ -450,12 +474,20 @@ class ChatCore:
         if _slider_tokens > 0:
             response_options["num_predict"] = max(16, min(1024, _slider_tokens))
         persona = None
+        card = None
+        if getattr(self, "profile_card", None) and not extra_care and self.settings.get("profile_card_enabled", True):
+            try:
+                card = self.profile_card.build(max_tokens=int(self.settings.get("profile_card_tokens", 120)))
+            except Exception:
+                card = None
+        self.last_profile_card = card
         if self.user_model and not extra_care:
             try:
                 persona = self.user_model.persona_context(
                     user_text,
                     budget_tokens=int(self.companion_config.get("persona_budget_tokens", 200)),
                     max_items=int(self.companion_config.get("max_injected_items", 4)),
+                    exclude_ids=(card.node_ids if card else None),
                 )
             except Exception:
                 persona = None
@@ -489,6 +521,7 @@ class ChatCore:
             buddy_name=self.buddy_name,
             persona_context=(persona.text if persona and not extra_care else ""),
             response_mode=response_mode,
+            profile_card=(card.text if card and not extra_care else ""),
         )
         # Camera rules are only added when the topic makes them relevant (saves ~150 prompt tokens per turn).
         _camera_relevant = bool(self.camera_declined_this_chat) or bool(re.search(
@@ -665,6 +698,9 @@ class ChatCore:
         self.last_prompt_estimate = est_tokens
         self.last_prompt_truncated = did_truncate
         logging.getLogger(__name__).debug("Prompt estimate: %s tokens; truncated=%s; mode=%s", est_tokens, did_truncate, response_mode)
+        if card and card.node_ids and card.text and not extra_care and self.user_model:
+            try: self.user_model.mark_used(card.node_ids)      # the card is part of this prompt
+            except Exception: pass
         if persona and persona.node_ids and persona.text:
             try:
                 original_lines=persona.text.splitlines()[1:]
@@ -673,6 +709,17 @@ class ChatCore:
             except Exception: pass
         messages = build_messages(system, bounded_history, user_text,
                                   max_turns=self.settings.get("recent_turns", 6))
+        self._trace_prompt_ms = (time.perf_counter() - _t_ask) * 1000
+        try:
+            _hist_tokens = sum(estimate_tokens(str(m.get("content", ""))) for m in messages[1:-1])
+            self.trace.step("Memory + prompt build", self._trace_prompt_ms,
+                            system_tokens=estimate_tokens(system), history_tokens=_hist_tokens,
+                            history_messages=max(0, len(messages) - 2),
+                            card_tokens=(card.est_tokens if card and card.text else 0),
+                            memory_items=(len(persona.node_ids) if persona and persona.text else 0),
+                            tools_offered=(len(tool_names) if (use_tools and tool_names) else 0))
+        except Exception:
+            pass
         if use_tools and self.tool_orchestrator is not None and tool_names:
             return self._call_tool_orchestrator(messages, on_token, response_options)
         if callable(getattr(self.llm, "chat", None)):
@@ -2084,6 +2131,17 @@ Rules:
         return None
 
     def handle_message(self, user_text, on_token=None):
+        """Timed wrapper around the real handler; every message gets a live trace."""
+        trace = self.trace.begin(user_text)
+        started = time.perf_counter()
+        result = None
+        try:
+            result = self._handle_message_impl(user_text, on_token=on_token)
+            return result
+        finally:
+            self.trace.finish(trace, (time.perf_counter() - started) * 1000, result)
+
+    def _handle_message_impl(self, user_text, on_token=None):
         """Returns a dict: {"reply": str, "flag": "none"/"medium"/"high"/"language"/"error"}"""
         user_text = user_text.strip()
         if not user_text:

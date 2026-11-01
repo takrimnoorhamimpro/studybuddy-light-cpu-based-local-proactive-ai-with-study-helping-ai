@@ -51,7 +51,44 @@ def _json_object(text):
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("Model did not return a JSON object")
-    return json.loads(text[start:end + 1])
+    candidate = text[start:end + 1]
+    try:
+        return json.loads(candidate)
+    except ValueError as first_error:
+        # Small local models often add trailing commas or get cut off mid-object. Repair, then salvage.
+        try:
+            return json.loads(re.sub(r",\s*([}\]])", r"\1", candidate))
+        except ValueError:
+            pass
+        marker = text.find('"memories"')
+        bracket = text.find("[", marker) if marker >= 0 else -1
+        if bracket < 0:
+            raise first_error
+        items, depth, begin, in_string, escaped = [], 0, None, False, False
+        for index in range(bracket + 1, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped: escaped = False
+                elif char == "\\": escaped = True
+                elif char == '"': in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                if depth == 0: begin = index
+                depth += 1
+            elif char == "}" and depth:
+                depth -= 1
+                if depth == 0 and begin is not None:
+                    try:
+                        piece = json.loads(text[begin:index + 1])
+                        if isinstance(piece, dict): items.append(piece)
+                    except ValueError:
+                        pass
+                    begin = None
+            elif char == "]" and depth == 0:
+                break
+        return {"memories": items}
 
 
 class LifecycleService:
@@ -350,6 +387,9 @@ class LifecycleService:
                     or is_instruction_like(label) or is_instruction_like(evidence)):
                 continue
             if not self._has_explicit_category_signal(kind, evidence):
+                continue
+            from companion.memory_quality import low_quality_reason
+            if low_quality_reason(label, evidence, kind, "conversation"):
                 continue
             if kind == "episode" and not self._worthy_life_moment(evidence, importance):
                 continue

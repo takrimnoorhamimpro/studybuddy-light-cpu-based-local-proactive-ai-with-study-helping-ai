@@ -58,13 +58,15 @@ def _character_text(character):
 def build_system_prompt(safety_core, character, strictness="medium",
                         owner_facts=None, retrieved_notes=None,
                         situation_line="", extra_care=False,
-                        user_name=None, buddy_name=None, persona_context="", response_mode="chat"):
+                        user_name=None, buddy_name=None, persona_context="", response_mode="chat", profile_card=""):
     parts = [safety_core, _character_text(character), CONVO_RULES]
     parts.append(STRICTNESS_TEXT.get(strictness, STRICTNESS_TEXT["medium"]))
 
     names = name_line(user_name, buddy_name)
     if names:
         parts.append(names)
+    if profile_card:
+        parts.append(str(profile_card).strip())   # stable between messages, so it sits before volatile parts
     if owner_facts:
         parts.append("Things you know about the user (these are about THEM, not you; "
                      "in these notes 'I' and 'my' mean the USER):\n- " + "\n- ".join(owner_facts))

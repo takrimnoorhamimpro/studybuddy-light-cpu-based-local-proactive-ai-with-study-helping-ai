@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import calendar, re, time
 from companion.sensitive import is_sensitive, is_instruction_like
+from companion.memory_quality import low_quality_reason
 
 @dataclass
 class Candidate:
@@ -159,9 +160,12 @@ def extract_relationship_candidates(user_text: str, *, previous_prompt='', now=N
     seen = set()
 
     def add(label, kind, evidence, ttl_days=None, *, prompted_answer=False):
+        kind_hint = kind
         label = ' '.join(str(label or '').split()).strip(' .,!;:')
         evidence = ' '.join(str(evidence or '').split())[:160]
         key = label.casefold()
+        if prompted_answer and low_quality_reason(label, evidence, kind_hint, "conversation"):
+            return
         if (not label or key in seen or len(label.split()) < 3
                 or len(label) > 180 or is_sensitive(label)
                 or is_instruction_like(label)

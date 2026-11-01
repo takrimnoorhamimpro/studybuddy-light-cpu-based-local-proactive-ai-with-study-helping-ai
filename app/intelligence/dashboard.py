@@ -14,6 +14,47 @@ _STATUS_COLOURS = {
 }
 
 
+def _ai_detail(trace):
+    for step in trace.get("steps", []):
+        if step.get("name") == "AI model":
+            return step.get("detail") or {}
+    return {}
+
+
+def trace_row(trace):
+    """Values for one row of the Live Trace table."""
+    detail = _ai_detail(trace)
+    total = trace.get("total_ms")
+    tps = detail.get("tokens_per_second")
+    return (datetime.datetime.fromtimestamp(trace.get("ts", 0)).strftime("%H:%M:%S"),
+            trace.get("text", ""), trace.get("route", "") or "running…",
+            "…" if total is None else ("%d ms" % total if total < 1000 else "%.1f s" % (total / 1000.0)),
+            detail.get("prompt_tokens") or "-", ("%.1f" % tps) if tps else "-")
+
+
+def trace_hint(trace):
+    """One plain-language sentence saying where the time went."""
+    total = trace.get("total_ms")
+    if not total:
+        return "This message is still being processed…"
+    detail = _ai_detail(trace)
+    if not detail:
+        return "Handled locally by Python in %.0f ms, with no AI model call, so it is instant." % total
+    prompt_ms = float(detail.get("prompt_eval_ms") or 0)
+    tps = float(detail.get("tokens_per_second") or 0)
+    gen_ms = (float(detail.get("generated_tokens") or 0) / tps * 1000) if tps else 0.0
+    load_ms = float(detail.get("load_ms") or 0)
+    parts = [("the AI reading your prompt (%s tokens)" % (detail.get("prompt_tokens") or "?"), prompt_ms),
+             ("the AI writing the reply (%s tokens at %.1f tok/s)" % (detail.get("generated_tokens") or "?", tps), gen_ms),
+             ("loading the model into memory", load_ms)]
+    name, value = max(parts, key=lambda item: item[1])
+    share = 100.0 * value / total if total else 0
+    advice = {0: " A shorter prompt or fewer history turns speeds this up.",
+              1: " A lower reply-length setting speeds this up.",
+              2: " This only happens after the model was unloaded; keep_alive keeps it ready."}[parts.index((name, value))]
+    return "Most of the time (%.0f%%) went to %s.%s" % (share, name, advice)
+
+
 # One authoritative graph definition shared by drawing, click-details and tests.
 # It deliberately contains exactly one primary LLM node.
 ARCHITECTURE_NODES = {
@@ -57,6 +98,9 @@ class IntelligenceDashboard:
         self.window.minsize(850, 590)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self._after_id = None
+        self._trace_signature = None
+        self._trace_selected = None
+        self._trace_items = {}
         self._build()
         self.refresh()
         self._schedule_refresh()
@@ -79,11 +123,14 @@ class IntelligenceDashboard:
         self.capabilities_tab = ttk.Frame(self.notebook, padding=10)
         self.activity_tab = ttk.Frame(self.notebook, padding=10)
         self.memory_tab = ttk.Frame(self.notebook, padding=10)
+        self.trace_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.overview_tab, text="Overview & Graph")
+        self.notebook.add(self.trace_tab, text="Live Trace")
         self.notebook.add(self.capabilities_tab, text="Capabilities")
         self.notebook.add(self.activity_tab, text="Tool Activity")
         self.notebook.add(self.memory_tab, text="Memory & Privacy")
         self._build_overview()
+        self._build_trace()
         self._build_capabilities()
         self._build_activity()
         self._build_memory_tab()
@@ -133,6 +180,86 @@ class IntelligenceDashboard:
         ttk.Label(self.capabilities_tab, textvariable=self.cap_detail_var,
                   wraplength=900, foreground="#64748b").pack(fill="x", pady=(8, 0))
         self.cap_tree.bind("<<TreeviewSelect>>", self._show_capability_detail)
+
+    def _build_trace(self):
+        ttk.Label(self.trace_tab, text="Every message, step by step: where the time went",
+                  font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(self.trace_tab, text="Kept in memory only (last 60 messages); nothing here is saved to disk.",
+                  foreground="#64748b").pack(anchor="w", pady=(0, 6))
+        columns = ("time", "message", "route", "total", "prompt", "speed")
+        self.trace_tree = ttk.Treeview(self.trace_tab, columns=columns, show="headings", height=7, selectmode="browse")
+        for col, text, width in (("time", "Time", 70), ("message", "Message", 300), ("route", "Route", 190),
+                                 ("total", "Total", 70), ("prompt", "Prompt tok", 80), ("speed", "Tok/s", 60)):
+            self.trace_tree.heading(col, text=text)
+            self.trace_tree.column(col, width=width, anchor="w")
+        self.trace_tree.pack(fill="x")
+        self.trace_tree.bind("<<TreeviewSelect>>", self._on_trace_select)
+        self.trace_canvas = tk.Canvas(self.trace_tab, height=250, bg="#f8fafc", highlightthickness=1,
+                                      highlightbackground="#cbd5e1")
+        self.trace_canvas.pack(fill="both", expand=True, pady=(8, 4))
+        self.trace_canvas.bind("<Configure>", lambda _e: self._draw_trace())
+        self.trace_hint_var = tk.StringVar(value="Send a message to see its pipeline here.")
+        ttk.Label(self.trace_tab, textvariable=self.trace_hint_var, wraplength=950, justify="left").pack(anchor="w")
+
+    def _on_trace_select(self, _event=None):
+        picked = self.trace_tree.selection()
+        self._trace_selected = int(picked[0]) if picked else None
+        self._draw_trace()
+
+    def _refresh_trace(self):
+        recorder = getattr(self.core, "trace", None) if self.core is not None else None
+        if recorder is None:
+            return
+        items = recorder.recent(40)
+        signature = tuple((t["id"], t["done"], t["total_ms"], len(t["steps"])) for t in items)
+        if signature == self._trace_signature:
+            return
+        self._trace_signature = signature
+        self._trace_items = {t["id"]: t for t in items}
+        keep = self._trace_selected if self._trace_selected in self._trace_items else (items[0]["id"] if items else None)
+        self.trace_tree.delete(*self.trace_tree.get_children())
+        for trace in items:
+            self.trace_tree.insert("", "end", iid=str(trace["id"]), values=trace_row(trace))
+        if keep is not None and self.trace_tree.exists(str(keep)):
+            self._trace_selected = keep
+            self.trace_tree.selection_set(str(keep))
+        self._draw_trace()
+
+    def _draw_trace(self):
+        canvas = self.trace_canvas
+        canvas.delete("all")
+        trace = self._trace_items.get(self._trace_selected)
+        if not trace:
+            return
+        width = max(560, canvas.winfo_width())
+        total = float(trace.get("total_ms") or sum(s["ms"] for s in trace["steps"]) or 1)
+        colours = {"AI model": "#7c3aed", "Memory + prompt build": "#0ea5e9"}
+        left, bar_w, y = 16, width - 360, 14
+        for step in trace["steps"]:
+            share = max(0.004, min(1.0, step["ms"] / total))
+            colour = colours.get(step["name"], "#94a3b8")
+            canvas.create_text(left, y, anchor="nw", text=step["name"], fill="#0f172a", font=("Segoe UI", 10, "bold"))
+            canvas.create_rectangle(left, y + 20, left + bar_w, y + 36, fill="#e2e8f0", outline="")
+            canvas.create_rectangle(left, y + 20, left + bar_w * share, y + 36, fill=colour, outline="")
+            seconds = step["ms"] / 1000.0
+            canvas.create_text(left + bar_w + 10, y + 20, anchor="nw", fill="#334155", font=("Segoe UI", 9),
+                               text=("%.2f s  (%.0f%%)" % (seconds, share * 100)) if seconds >= 0.01 else "%.0f ms" % step["ms"])
+            detail = step.get("detail") or {}
+            if step["name"] == "Memory + prompt build" and detail:
+                note = "prompt ≈ %s tok (profile card %s, history %s msgs / %s tok), %s memory item(s), %s tool(s) offered" % (
+                    detail.get("system_tokens", "?"), detail.get("card_tokens", 0), detail.get("history_messages", 0),
+                    detail.get("history_tokens", 0), detail.get("memory_items", 0), detail.get("tools_offered", 0))
+            elif step["name"] == "AI model" and detail:
+                note = "read %s tok in %.1f s · wrote %s tok at %s tok/s · load %s ms" % (
+                    detail.get("prompt_tokens", "?"), float(detail.get("prompt_eval_ms") or 0) / 1000.0,
+                    detail.get("generated_tokens", "?"), detail.get("tokens_per_second") or "?", detail.get("load_ms") or 0)
+            else:
+                note = ""
+            if note:
+                canvas.create_text(left, y + 40, anchor="nw", text=note, fill="#64748b", font=("Segoe UI", 8))
+            y += 62
+        canvas.configure(scrollregion=(0, 0, width, y + 10))
+        self.trace_hint_var.set(trace_hint(trace))
 
     def _build_activity(self):
         columns = ("time", "tool", "source", "status", "duration", "summary")
@@ -319,6 +446,10 @@ class IntelligenceDashboard:
     def refresh(self):
         if not self.window.winfo_exists():
             return
+        try:
+            self._refresh_trace()
+        except Exception:
+            pass
         self._capabilities = self.registry.snapshot()
         stats = self.monitor.stats()
         active = sum(1 for c in self._capabilities if c["status"] == "active")
