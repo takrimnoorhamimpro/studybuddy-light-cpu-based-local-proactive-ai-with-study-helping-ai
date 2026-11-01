@@ -1,5 +1,5 @@
 {
-  "model_chat": "qwen2.5:1.5b",
+  "model_chat": "llama3.2:3b",
   "ollama_url": "http://127.0.0.1:11434",
   "ollama_options": {
     "num_gpu": 0,
@@ -14,11 +14,11 @@
   "adapters_to_keep": 5,
   "profile": "hamim",
   "proactive_enabled": true,
-  "proactive_min_user_quiet_seconds": 60,
+  "proactive_min_user_quiet_seconds": 15,
   "proactive_idle_seconds": 0,
-  "proactive_app_seconds": 24,
+  "proactive_app_seconds": 5,
   "proactive_same_title_repeat_minutes": 1,
-  "proactive_title_summary_minutes": 4,
+  "proactive_title_summary_minutes": 2,
   "voice_enabled": true,
   "webcam_enabled": true,
   "camera_min_interval_minutes": 5,
@@ -37,7 +37,7 @@
   "max_prompt_facts": 0,
   "tool_retrieval_mode": "bm25",
   "tool_retrieval_max_tools": 2,
-  "proactive_switch_stability_seconds": 24,
+  "proactive_switch_stability_seconds": 5,
   "history_restore_hours": 0,
   "response_effort": "Extra"
 }
