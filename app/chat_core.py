@@ -39,17 +39,6 @@ from companion.relationship import RelationshipBuilder
 from proactive_policy import classify_user_boundary
 
 
-TITLE_RECAP_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string"},
-        "interest_candidate": {"type": "string"},
-    },
-    "required": ["summary", "interest_candidate"],
-    "additionalProperties": False,
-}
-
-
 def _load_json(path, default=None):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -1236,9 +1225,29 @@ Rules:
             + (". Speaking style: " + speech_style if speech_style else "")
             + ("\n" + role_map if role_map else "")
         )
-        # Keep old turns out of unsolicited generations. The current title plus
-        # repeat metadata is enough to make a fresh check-in; replaying an old
-        # question here made the model answer it as though the user had just asked.
+        prior_dialogue = []
+        previous_checkin = str(snapshot.get("previous_checkin") or "").strip()
+        if previous_checkin:
+            try:
+                previous_at = float(snapshot.get("previous_checkin_at") or 0)
+            except (TypeError, ValueError):
+                previous_at = 0.0
+            prior_dialogue.append((previous_at, 0, "assistant", previous_checkin))
+        for exchange in snapshot.get("recent_related_exchange", []) or []:
+            if not isinstance(exchange, dict):
+                continue
+            try:
+                stamp = float(exchange.get("at") or 0)
+            except (TypeError, ValueError):
+                stamp = 0.0
+            user_message = str(exchange.get("user") or "").strip()
+            buddy_message = str(exchange.get("buddy") or "").strip()
+            if user_message:
+                prior_dialogue.append((stamp, 1, "user", user_message))
+            if buddy_message:
+                prior_dialogue.append((stamp, 2, "assistant", buddy_message))
+        prior_dialogue.sort(key=lambda item: (item[0], item[1]))
+        prior_dialogue = prior_dialogue[-8:]
         current_observation = {
             key: snapshot.get(key) for key in (
                 "app_name", "app_category", "window_title", "private_context",
@@ -1259,6 +1268,8 @@ Rules:
         )
         try:
             messages = [{"role": "system", "content": system}]
+            messages.extend({"role": role, "content": content}
+                            for _stamp, _order, role, content in prior_dialogue)
             messages.append({"role": "user", "content": prompt})
             if cancel_event is not None and cancel_event.is_set():
                 return ""
@@ -1296,9 +1307,11 @@ Rules:
                 except (TypeError, ValueError):
                     raw_reply = method(messages)
             guess = self._correct_greeting_addressee(self.safety.safe_output(raw_reply).strip())
-            guess = self.strip_internal_skip_lines(guess)[:420].strip()
-            if not guess:
+            if not guess or guess.casefold() == "[skip]":
                 return ""
+            if re.search(r"\[\s*skip\s*\]", guess, re.I):
+                return ""
+            guess = guess[:420].strip()
         except Exception:
             return ""
 
@@ -1306,8 +1319,8 @@ Rules:
         # memory or reusable chat history; the title remains ephemeral context.
         return guess
 
-    def generate_title_session_recap(self, entries, interval_minutes=4, cancel_event=None):
-        """Summarize recent title-linked chat and propose one optional interest in English."""
+    def generate_title_session_recap(self, entries, cancel_event=None):
+        """Summarize recent title-linked chat from this app session in English."""
         import json as _json
         import datetime as _datetime
 
@@ -1355,40 +1368,16 @@ Rules:
             {"time": entry.get("time", ""), "what_the_user_said": entry.get("user_said", "")}
             for entry in clean_entries if str(entry.get("user_said") or "").strip()
         ]
-        saved_interests = []
-        if self.personal_companion:
-            try:
-                saved_interests = [
-                    str(node.get("label") or "")[:120]
-                    for node in self.personal_companion.list_nodes(include_candidates=False)
-                    if node.get("kind") == "interest" and node.get("consented")
-                ][:30]
-            except Exception:
-                saved_interests = []
-        try:
-            interval_minutes = max(1, min(1440, int(interval_minutes)))
-        except (TypeError, ValueError):
-            interval_minutes = 4
         prompt = (
-            "Review this batch of recent desktop check-in exchanges and write a short, useful recap in English. "
-            "Return JSON with exactly two string fields: summary and interest_candidate. The summary should be "
-            "addressed directly to the user and contain one to three concise bullet points about the main topics "
-            "that came up during the last " + str(interval_minutes) + " minutes. Name the subject or broad topic; "
-            "do not repeat full window titles, counters, browser names, or media-site suffixes. Base claims about "
-            "what the user actually did, watched, read, liked, or asked only on their own statements. A window title "
-            "is only an uncertain clue about an open window, so phrase title-only topics as possibilities and never "
-            "claim time spent or personal interest from a title alone. Buddy's guesses and questions are not evidence "
-            "that the user likes a topic. Do not continue an earlier conversation or invent actions, preferences, or "
-            "feelings. Do not return SKIP: when evidence is sparse, give a cautious recap of the available topic clues. "
-            "Set interest_candidate to one short, clear topic from the recap that the user could choose to save as "
-            "an interest. Do not suggest an interest already listed below. Use an empty string only if no safe, new, "
-            "coherent topic can be named. This is a suggestion, not a saved memory.\n"
-            "Already saved interests (JSON):\n"
-            + _json.dumps(saved_interests, ensure_ascii=False, separators=(",", ":"))
-            + "\n"
-            "User statements (strongest evidence, JSON):\n"
+            "Give a concise, natural English recap addressed directly to the user. Base claims about what they "
+            "did, watched, read, liked, or asked only on their own statements below. Window titles are uncertain "
+            "clues about open windows; do not state that the user watched or read something unless they said so. "
+            "Ignore Buddy's earlier guesses and questions as evidence of the user's interests. Do not answer an "
+            "old question or restart an old conversation. Mention an observation only as an uncertain title clue "
+            "when useful. If there is no meaningful user-confirmed topic, output [SKIP]. Do not invent preferences, "
+            "actions, or feelings.\nUser statements (JSON):\n"
             + _json.dumps(user_statements, ensure_ascii=False, separators=(",", ":"))
-            + "\nWindow-title observations (uncertain topic clues, JSON):\n"
+            + "\nWindow-title observations (uncertain context only, JSON):\n"
             + _json.dumps(observations, ensure_ascii=False, separators=(",", ":"))
         )
         try:
@@ -1399,14 +1388,11 @@ Rules:
             if callable(getattr(self.llm, "chat_completion", None)):
                 import inspect
                 method = self.llm.chat_completion
-                kwargs = {"tools": [], "options": {"num_predict": 128, "temperature": 0.1}}
+                kwargs = {"tools": [], "options": {"num_predict": 128}}
                 try:
                     parameters = inspect.signature(method).parameters
                     if "options" not in parameters:
                         kwargs.pop("options", None)
-                    if "response_format" in parameters or any(
-                            param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
-                        kwargs["response_format"] = TITLE_RECAP_SCHEMA
                     if cancel_event is not None and "on_token" in parameters:
                         kwargs["on_token"] = lambda _chunk: not cancel_event.is_set()
                     if cancel_event is not None and ("cancel_event" in parameters or any(
@@ -1425,62 +1411,21 @@ Rules:
                 try:
                     parameters = inspect.signature(method).parameters
                     if "options" in parameters:
-                        kwargs["options"] = {"num_predict": 128, "temperature": 0.1}
-                    if "response_format" in parameters:
-                        kwargs["response_format"] = TITLE_RECAP_SCHEMA
+                        kwargs["options"] = {"num_predict": 128}
                     if cancel_event is not None and "cancel_event" in parameters:
                         kwargs["cancel_event"] = cancel_event
                 except (TypeError, ValueError):
                     pass
                 raw_reply = method(messages, **kwargs)
-            cleaned_reply = self.strip_internal_skip_lines(self.safety.safe_output(raw_reply).strip())
-            payload = None
-            try:
-                payload = _json.loads(cleaned_reply)
-            except (TypeError, ValueError):
-                match = re.search(r"\{.*\}", cleaned_reply, flags=re.S)
-                if match:
-                    try:
-                        payload = _json.loads(match.group(0))
-                    except (TypeError, ValueError):
-                        payload = None
-            if isinstance(payload, dict):
-                recap = str(payload.get("summary") or "").strip()
-                interest_candidate = str(payload.get("interest_candidate") or "").strip()
-            else:
-                # Some small local models ignore JSON mode. Their useful prose is
-                # still shown; a memory prompt is withheld unless a topic was parsed.
-                recap = cleaned_reply
-                interest_candidate = ""
-            recap = self._correct_greeting_addressee(recap)[:700].strip()
-            recap = self.strip_internal_skip_lines(recap)
-            interest_candidate = " ".join(interest_candidate.split()).strip(" \t\r\n\"'`.,;:")[:100]
-            interest_candidate = self.strip_internal_skip_lines(
-                self.safety.safe_output(interest_candidate)).strip()
-            if interest_candidate:
-                from companion.sensitive import is_instruction_like, is_sensitive
-                if is_sensitive(interest_candidate) or is_instruction_like(interest_candidate):
-                    interest_candidate = ""
-            if not recap:
-                recap = "I noticed a few possible topics in the windows you had open, but I couldn't make a reliable recap this time."
-            if not interest_candidate or len(interest_candidate) < 2:
-                interest_candidate = ""
+            recap = self._correct_greeting_addressee(self.safety.safe_output(raw_reply).strip())
+            if not recap or recap.casefold() == "[skip]":
+                return ""
+            if re.search(r"\[\s*skip\s*\]", recap, re.I):
+                return ""
+            recap = recap[:700].strip()
         except Exception:
-            return {"summary": "", "interest_candidate": ""}
-        return {"summary": recap, "interest_candidate": interest_candidate}
-
-    @staticmethod
-    def strip_internal_skip_lines(text):
-        """Remove model control-token lines before generated text reaches the UI."""
-        kept = []
-        for line in str(text or "").splitlines():
-            candidate = re.sub(r"^\s*(?:buddy|luna)\s*:\s*", "", line, flags=re.I)
-            candidate = candidate.strip().strip("*`_").strip()
-            candidate = candidate.strip("[]").strip().rstrip(".!?").strip().casefold()
-            if candidate in {"skip", "[skip]"}:
-                continue
-            kept.append(line)
-        return "\n".join(kept).strip()
+            return ""
+        return recap
 
     def _fast_greeting_response(self, user_text):
         """Answer simple social openers locally, without spending an LLM call.
