@@ -74,7 +74,7 @@ class ToolOrchestrator:
         "tool": {"capability", "feature"},
         "tools": {"capability", "feature"},
     }
-    MAX_ROUTED_TOOLS = 2
+    MAX_ROUTED_TOOLS = 6
 
     @classmethod
     def _normalise_token(cls, token):
@@ -245,8 +245,7 @@ class ToolOrchestrator:
             # Preserve the registry's canonical order and cap prompt size.
             return [name for name in self.registry.names() if name in matched][:self.MAX_ROUTED_TOOLS]
 
-        # Prefer configured fallback routes first; unmatched paraphrases continue
-        # through the generic local BM25 retrieval below.
+        # Only spend BM25 work when the input resembles an explicit operation/query.
         for pattern in config.get("tool_route_fallback_patterns", []):
             try:
                 if re.search(pattern, str(query), re.I | re.S):
@@ -258,45 +257,19 @@ class ToolOrchestrator:
                     return [name for score, name in ranked if score >= floor][:self.MAX_ROUTED_TOOLS]
             except re.error:
                 continue
-        # An editable phrase hint is a fast path, not a whitelist. Let local
-        # lexical retrieval find a suitable tool for new paraphrases as well.
-        ranked = self._rank_tools(query)
-        if not ranked:
-            return []
-        best = ranked[0][0]
-        floor = max(2.5, best * 0.58)
-        return [name for score, name in ranked if score >= floor][:self.MAX_ROUTED_TOOLS]
+        return []
 
     def tools_for_text(self, user_text):
         """Route only likely tool requests. LLM chooses and arguments; Python validates.
 
         With the editable route dictionary installed, ordinary conversation receives no
-        tool schemas unless a phrase hint or local BM25 retrieval finds a plausible tool.
-        Embeddings are not called on the normal chat path.
+        tool schemas. BM25 is an explicit-operation fallback; embeddings are not called
+        on the normal chat path.
         """
         query = str(user_text or "")
         if query in self._route_cache:
             self.last_route = list(self._route_cache[query])
             return list(self.last_route)
-        # Personal-recall questions need evidence from this profile's local records.
-        # Route them by the shape of the question, not a list of favorite topics.
-        self_reference = bool(re.search(r"\b(?:my|mine|i|me|we|our|ours)\b", query, re.I))
-        asks_for_information = bool(
-            "?" in query
-            or re.search(r"(?i)^\s*(?:what|which|who|where|when|how|do|does|did|have|has|am|is|are|was|were|can|could)\b", query)
-        )
-        asks_about_remembered_detail = bool(
-            re.search(r"(?i)\b(?:like|love|enjoy|prefer|favorite|favourite|interest|remember|recall|told|said|mentioned|talked|read|watch|work|study)\b", query)
-        )
-        if (self_reference and asks_for_information
-                and (re.search(r"(?i)\bmy\b", query) or asks_about_remembered_detail)
-                and "search_memory" in self.registry._tools):
-            chosen = ["search_memory"]
-            self.last_route = chosen
-            self._route_cache[query] = list(chosen)
-            if len(self._route_cache) > 96:
-                self._route_cache.pop(next(iter(self._route_cache)))
-            return chosen
         if self.retrieval_mode == "all":
             chosen = self.registry.names()
             self.last_route = list(chosen)
@@ -309,7 +282,6 @@ class ToolOrchestrator:
             if len(self._route_cache) > 96:
                 self._route_cache.pop(next(iter(self._route_cache)))
             return list(chosen)
-
         ranked = self._rank_tools(query)
         # A strong lexical match is cheaper than an embedding request. Lower-confidence
         # matches get semantic retrieval to separate similar tools (e.g. list vs complete).
@@ -350,53 +322,14 @@ class ToolOrchestrator:
             self._route_cache.pop(next(iter(self._route_cache)))
         return list(chosen)
 
-    def prefetch_history_context(self, user_text, selected_names=None):
-        """Fetch compact read-only history data when retrieval ranks it for a turn."""
-        names = set(selected_names or self.tools_for_text(user_text))
-        if "search_memory" not in names or "search_memory" not in self.registry._tools:
-            return None
-        words = set(re.findall(r"[a-z]+", str(user_text or "").casefold()))
-        has_today_reference = bool(words & {"today", "tonight"}) or (
-            "this" in words and bool(words & {"morning", "afternoon", "evening"}))
-        scope = "today" if has_today_reference else "all"
-        query = "" if scope == "today" else str(user_text or "")
-        try:
-            result = self.registry.execute(
-                "search_memory", {"query": query, "scope": scope, "limit": 20})
-        except Exception:
-            return None
-        if not isinstance(result, dict):
-            return None
-        compact = {"scope": result.get("scope", scope)}
-        turns = result.get("conversation_matches") or []
-        compact["conversation"] = [
-            {key: str(item.get(key) or "")[:150] for key in ("time", "role", "text")}
-            for item in turns[-16:]
-            if isinstance(item, dict)
-        ]
-        events = result.get("session_events") or []
-        compact["window_observations"] = [
-            {key: str(item.get(key) or "")[:110]
-             for key in ("time", "app", "title_clue", "user_said")}
-            for item in events[-4:]
-            if isinstance(item, dict)
-        ]
-        compact["facts"] = [str(item)[:160] for item in (result.get("facts") or [])[:2]]
-        compact["notes"] = [
-            {"period": str(item.get("period") or ""), "text": str(item.get("text") or "")[:160]}
-            for item in (result.get("notes") or [])[:2]
-            if isinstance(item, dict)
-        ]
-        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
-
     def __init__(self, llm, registry, monitor=None, max_rounds=2, max_calls_per_turn=4,
-                 max_routed_tools=2, retrieval_mode="bm25", routing_config_path=None):
+                 max_routed_tools=4, retrieval_mode="bm25", routing_config_path=None):
         self.llm = llm
         self.registry = registry
         self.monitor = monitor
         self.max_rounds = max(1, int(max_rounds))
         self.max_calls_per_turn = max(1, int(max_calls_per_turn))
-        self.MAX_ROUTED_TOOLS = max(1, min(int(max_routed_tools), len(registry.names()) or 1))
+        self.MAX_ROUTED_TOOLS = max(2, min(int(max_routed_tools), len(registry.names()) or 2))
         self.retrieval_mode = str(retrieval_mode or "bm25").casefold()
         if self.retrieval_mode not in {"hybrid", "bm25", "all"}:
             self.retrieval_mode = "bm25"
@@ -422,7 +355,7 @@ class ToolOrchestrator:
         except Exception:
             return json.dumps({"ok": False, "error": "Tool returned a non-serializable result"})
 
-    def run(self, messages, on_token=None, options=None, cancel_event=None):
+    def run(self, messages, on_token=None, options=None):
         if not callable(getattr(self.llm, "chat_completion", None)):
             # Compatibility with legacy clients/test doubles. Streaming is supported
             # by OllamaClient; older adapters continue to work without the callback.
@@ -430,10 +363,8 @@ class ToolOrchestrator:
         if self.monitor:
             with self.monitor.track("agent_tool_calling", "LLM tool orchestration",
                                     "Milo agent", "Tool schemas and private message content omitted"):
-                return self._run_tool_loop(messages, on_token=on_token, options=options,
-                                           cancel_event=cancel_event)
-        return self._run_tool_loop(messages, on_token=on_token, options=options,
-                                   cancel_event=cancel_event)
+                return self._run_tool_loop(messages, on_token=on_token, options=options)
+        return self._run_tool_loop(messages, on_token=on_token, options=options)
 
     def _direct_tool_reply(self, name, payload):
         """Format common, verified utility results without a second LLM pass.
@@ -479,19 +410,10 @@ class ToolOrchestrator:
                 title = ""
             bits = []
             if app_name and app_name.lower() not in {"unknown", "unknown.exe"}:
-                bits.append("app " + app_name)
+                bits.append("foreground app " + app_name)
             bits.append("category " + category)
             if title:
                 bits.append("window title " + repr(title[:120]))
-            source = str(snapshot.get("observation_source") or "current_foreground")
-            age = snapshot.get("age_seconds")
-            if source == "last_external_window":
-                try:
-                    age = max(0, int(age or 0))
-                except (TypeError, ValueError):
-                    age = None
-                bits.append("most recently observed external window"
-                            + (f" about {age} seconds ago" if age is not None else ""))
             idle = snapshot.get("idle_seconds", result.get("idle_seconds"))
             detail = "; ".join(bits)
             if idle is not None:
@@ -520,7 +442,6 @@ class ToolOrchestrator:
             facts = result.get("facts") or []
             notes = result.get("notes") or []
             turns = result.get("conversation_matches") or []
-            session_events = result.get("session_events") or []
             if facts:
                 sections.append("Saved facts:\n" + "\n".join("- " + str(x) for x in facts[:5]))
             if notes:
@@ -531,12 +452,6 @@ class ToolOrchestrator:
                 sections.append("Matching conversation turns:\n" + "\n".join(
                     "- " + (f"[{t.get('time')}] " if t.get("time") else "") + str(t.get("role") or "") + ": " + str(t.get("text") or "")[:220]
                     for t in turns[:5]))
-            if session_events:
-                sections.append("Current-session desktop clues (titles show open windows, not confirmed actions):\n" + "\n".join(
-                    "- " + (f"[{item.get('time')}] " if item.get("time") else "")
-                    + str(item.get("app") or "") + ": " + str(item.get("title_clue") or "")[:140]
-                    + ((" · You said: " + str(item.get("user_said") or "")[:140]) if item.get("user_said") else "")
-                    for item in session_events[:12]))
             profile = result.get("profile") or {}
             if profile:
                 sections.append("Saved profile:\n" + "\n".join(f"- {k}: {v}" for k, v in profile.items()))
@@ -625,20 +540,13 @@ class ToolOrchestrator:
             return "Your pending reminders:\n" + "\n".join(lines)
         return None
 
-    def _chat_completion(self, messages, *, tools=None, on_token=None, options=None, cancel_event=None):
+    def _chat_completion(self, messages, *, tools=None, on_token=None, options=None):
         """Call compatible local clients with request-scoped generation options."""
         import inspect
         method = self.llm.chat_completion
         kwargs = {}
         if tools is not None: kwargs["tools"] = tools
         if callable(on_token): kwargs["on_token"] = on_token
-        if cancel_event is not None:
-            try:
-                params = inspect.signature(method).parameters
-                if "cancel_event" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-                    kwargs["cancel_event"] = cancel_event
-            except (TypeError, ValueError):
-                pass
         if options is not None:
             try:
                 params = inspect.signature(method).parameters
@@ -648,7 +556,7 @@ class ToolOrchestrator:
                 pass
         return method(messages, **kwargs)
 
-    def _synthesize_lookup(self, name, working, fallback, on_token=None, options=None, cancel_event=None):
+    def _synthesize_lookup(self, name, working, fallback, on_token=None, options=None):
         """Let the LLM interpret verified lookup results without access to more tools."""
         if not callable(getattr(self.llm, "chat_completion", None)):
             return fallback
@@ -659,9 +567,9 @@ class ToolOrchestrator:
         )
         if name == "get_desktop_context":
             policy += (
-                "For desktop-awareness results, interpret the actual clues in the foreground app and "
-                "privacy-filtered active-window title/category, and make one brief tentative inference without being limited to preset content categories. "
-                "Carry the user's explicit corrections forward instead of reviving an earlier guess. "
+                "For desktop-awareness results, make one brief educated guess from the foreground app and the "
+                "privacy-filtered active-window title/category. Naturally signal uncertainty. If title suggests a video, "
+                "document, coding project, or research, you may infer a likely activity without claiming to know its content. "
                 "Do not say you cannot infer anything when useful title clues are provided. Never claim to see pixels, read a webpage, "
                 "or watch a video. If the title is hidden or only a generic category is available, be correspondingly cautious."
             )
@@ -669,11 +577,7 @@ class ToolOrchestrator:
             policy += (
                 "For memory search results, summarize only the returned saved facts, notes, or previous turns. Never claim "
                 "you lack memory access when records are present. If the result contains no relevant records, say so plainly. "
-                "Treat a stated preference as known only when the user explicitly said it in the returned records; do not turn a topic they viewed or discussed into a favorite. "
-                "For a daily or current-session recap, use the returned turns and session clues together in time order. "
-                "A window title is only evidence of which window was open; distinguish that from actions the user confirmed in their own messages. "
-                "When the user asks for a recap, provide it directly from the returned records; do not ask what happened or ask the user to restate history that was returned. These are records in this app's local profile, "
-                "not a guarantee of access to other apps or chat histories."
+                "These are records in this app's local profile, not a guarantee of access to other apps or chat histories."
             )
         if augmented and augmented[0].get("role") == "system":
             augmented[0]["content"] = str(augmented[0].get("content") or "") + policy
@@ -682,11 +586,9 @@ class ToolOrchestrator:
         try:
             self.last_model_rounds += 1
             if callable(on_token):
-                response = self._chat_completion(augmented, tools=[], on_token=on_token, options=options,
-                                                 cancel_event=cancel_event)
+                response = self._chat_completion(augmented, tools=[], on_token=on_token, options=options)
             else:
-                response = self._chat_completion(augmented, tools=[], options=options,
-                                                 cancel_event=cancel_event)
+                response = self._chat_completion(augmented, tools=[], options=options)
             if response.get("cancelled"):
                 return fallback
             answer = str((response.get("message") or {}).get("content") or "").strip()
@@ -705,15 +607,11 @@ class ToolOrchestrator:
                 return fallback
         return answer
 
-    def _run_tool_loop(self, messages, on_token=None, options=None, cancel_event=None):
+    def _run_tool_loop(self, messages, on_token=None, options=None):
         working = [dict(m) for m in messages]
         user_text = next((str(m.get("content") or "") for m in reversed(working)
                           if m.get("role") == "user"), "")
         selected_names = self.tools_for_text(user_text)
-        if any(m.get("role") == "system"
-               and "RETRIEVED LOCAL MEMORY (JSON evidence):" in str(m.get("content") or "")
-               for m in working):
-            selected_names = [name for name in selected_names if name != "search_memory"]
         schemas = self.registry.definitions(selected_names)
         self.last_tool_calls = 0
         self.last_model_rounds = 0
@@ -723,14 +621,12 @@ class ToolOrchestrator:
         if not schemas:
             self.last_model_rounds = 1
             if callable(on_token):
-                response = self._chat_completion(working, tools=[], on_token=on_token, options=options,
-                                                 cancel_event=cancel_event)
+                response = self._chat_completion(working, tools=[], on_token=on_token, options=options)
             else:
-                response = self._chat_completion(working, tools=[], options=options,
-                                                 cancel_event=cancel_event)
+                response = self._chat_completion(working, tools=[], options=options)
             message = response.get("message") or {}
             content = str(message.get("content") or "").strip()
-            if response.get("cancelled") or (cancel_event is not None and cancel_event.is_set()):
+            if response.get("cancelled"):
                 return ""
             unsupported_claims = [name for name, pattern in self.SUCCESS_CLAIMS.items()
                                   if pattern.search(content)]
@@ -744,13 +640,11 @@ class ToolOrchestrator:
         for _round_index in range(self.max_rounds):
             self.last_model_rounds += 1
             if callable(on_token):
-                response = self._chat_completion(working, tools=schemas, on_token=on_token, options=options,
-                                                 cancel_event=cancel_event)
+                response = self._chat_completion(working, tools=schemas, on_token=on_token, options=options)
             else:
-                response = self._chat_completion(working, tools=schemas, options=options,
-                                                 cancel_event=cancel_event)
+                response = self._chat_completion(working, tools=schemas, options=options)
             message = response.get("message") or {}
-            if response.get("cancelled") or (cancel_event is not None and cancel_event.is_set()):
+            if response.get("cancelled"):
                 return ""
             tool_calls = message.get("tool_calls") or []
             content = str(message.get("content") or "").strip()
@@ -766,8 +660,6 @@ class ToolOrchestrator:
             tool_results = []
             single_call_name = None
             for call in tool_calls:
-                if cancel_event is not None and cancel_event.is_set():
-                    return ""
                 if calls_used >= self.max_calls_per_turn:
                     working.append({"role": "tool", "tool_name": "system", "content":
                                     self._json_result({"ok": False, "error": "Tool-call limit reached for this turn."})})
@@ -823,29 +715,23 @@ class ToolOrchestrator:
                                     and isinstance(snapshot_obj, dict)
                                     and not snapshot_obj.get("private_context")
                                     and snapshot_obj.get("app_category") != "Private"):
-                                return self._synthesize_lookup(called_name, working, direct, on_token=on_token,
-                                                               options=options, cancel_event=cancel_event)
+                                return self._synthesize_lookup(called_name, working, direct, on_token=on_token, options=options)
                         if called_name == "search_memory":
                             result_obj = (called_payload.get("result") or {}) if isinstance(called_payload, dict) else {}
                             has_records = isinstance(result_obj, dict) and any(
-                                result_obj.get(key) for key in ("facts", "notes", "conversation_matches", "session_events", "profile"))
+                                result_obj.get(key) for key in ("facts", "notes", "conversation_matches", "profile"))
                             if has_records:
-                                return self._synthesize_lookup(called_name, working, direct, on_token=on_token,
-                                                               options=options, cancel_event=cancel_event)
-                        return "" if cancel_event is not None and cancel_event.is_set() else direct
+                                return self._synthesize_lookup(called_name, working, direct, on_token=on_token, options=options)
+                        return direct
                 continue
             break
 
         # Complex/multi-tool requests still get a final natural-language explanation.
-        if cancel_event is not None and cancel_event.is_set():
-            return ""
         self.last_model_rounds += 1
         if callable(on_token):
-            final = self._chat_completion(working, tools=[], on_token=on_token, options=options,
-                                          cancel_event=cancel_event)
+            final = self._chat_completion(working, tools=[], on_token=on_token, options=options)
         else:
-            final = self._chat_completion(working, tools=[], options=options,
-                                          cancel_event=cancel_event)
+            final = self._chat_completion(working, tools=[], options=options)
         if final.get("cancelled"):
             return ""
         final_text = str((final.get("message") or {}).get("content") or

@@ -45,13 +45,10 @@ class ContextSnapshot:
     window_title: str = ""
     idle_seconds: float = 0.0
     captured_at: float = 0.0
-    # Internal-only ownership signal used to recognize any Study Buddy-owned
-    # window even if its visible title is customized. It is never serialized.
-    process_id: int = 0
 
     def safe_summary(self):
         # Hide both title and proactive interpretation for likely private/auth/payment windows.
-        title = self.window_title[:200].strip()
+        title = self.window_title[:120].strip()
         sensitive = bool(re.search(
             r"password|sign.?in|log.?in|authentication|bank|payment|checkout|private|incognito|inprivate|"
             r"password manager|credit card|billing|medical|patient portal|tax return|one.?time code|verification code",
@@ -80,11 +77,6 @@ class ContextEngine:
     def is_studybuddy_window(snapshot):
         if snapshot is None:
             return False
-        try:
-            if int(getattr(snapshot, "process_id", 0) or 0) == os.getpid():
-                return True
-        except (TypeError, ValueError):
-            pass
         process_name = str(getattr(snapshot, "app_name", "") or "").casefold()
         title = str(getattr(snapshot, "window_title", "") or "").casefold()
         return (any(token in process_name for token in ("python", "pythonw", "studybuddy", "study_buddy"))
@@ -130,7 +122,6 @@ class ContextEngine:
     @staticmethod
     def capture(idle_seconds=0):
         process_name, title = "unknown", ""
-        process_id = 0
         if os.name == "nt":
             try:
                 import ctypes
@@ -142,15 +133,13 @@ class ContextEngine:
                 title = buf.value
                 pid = ctypes.c_ulong()
                 ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                process_id = int(pid.value or 0)
-                process_name = psutil.Process(process_id).name()
+                process_name = psutil.Process(pid.value).name()
             except Exception:
                 pass
         snap = ContextSnapshot(
             app_category=ContextEngine._categorize(process_name, title),
             app_name=os.path.splitext(process_name)[0][:40],
-            window_title=title[:200], idle_seconds=float(idle_seconds or 0), captured_at=time.time(),
-            process_id=process_id)
+            window_title=title[:200], idle_seconds=float(idle_seconds or 0), captured_at=time.time())
         return snap
 
     def observe(self, idle_seconds=0):

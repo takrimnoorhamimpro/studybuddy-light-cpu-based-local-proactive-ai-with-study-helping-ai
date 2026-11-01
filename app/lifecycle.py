@@ -296,20 +296,12 @@ class LifecycleService:
         }
         try:
             params = inspect.signature(self.llm.chat).parameters
-            if cancel_event is not None and ("cancel_event" in params or any(
-                    param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())):
-                chat_kwargs["cancel_event"] = cancel_event
             if ("response_format" in params or any(
                     param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())):
                 chat_kwargs["response_format"] = MEMORY_REVIEW_SCHEMA
         except (TypeError, ValueError):
             pass
-        try:
-            raw = self.llm.chat(messages, **chat_kwargs)
-        except Exception:
-            if cancel_event is not None and cancel_event.is_set():
-                return {"status": "cancelled", "created": 0, "processed_turns": 0}
-            raise
+        raw = self.llm.chat(messages, **chat_kwargs)
         if cancel_event and cancel_event.is_set():
             return {"status": "cancelled", "created": 0, "processed_turns": 0}
         # Consent can be changed while the local model is reviewing a batch.

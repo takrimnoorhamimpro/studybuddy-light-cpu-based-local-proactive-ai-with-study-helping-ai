@@ -1,7 +1,6 @@
 """Built-in, permission-aware tools for Milo. UI actions stay behind callbacks."""
 from __future__ import annotations
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 import sys
 import time
 
@@ -59,9 +58,7 @@ def build_builtin_tool_registry(core, app=None, capability_registry=None):
             })
             if scope == "all" and explicit_past_chat:
                 scope = "conversations"
-        result = {"scope": scope, "query": query,
-                  "profile": profile() if scope in ("all", "facts") else {}, "facts": [], "notes": [],
-                  "conversation_matches": [], "session_events": []}
+        result = {"scope": scope, "query": query, "profile": profile(), "facts": [], "notes": [], "conversation_matches": []}
         terms = [w.casefold() for w in query.split() if len(w) > 2]
         if scope in ("all", "facts"):
             facts = memory.list_facts(30)
@@ -73,43 +70,14 @@ def build_builtin_tool_registry(core, app=None, capability_registry=None):
                 notes = memory.list_notes(limit)
             result["notes"] = [{"period": n.get("period"), "level": n.get("level"), "text": n.get("text")}
                                for n in notes[:limit]]
-        if scope in ("all", "conversations", "today"):
-            if scope == "today":
-                day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                day_end = day_start + timedelta(days=1)
-                turns = (memory.turns_between(day_start.timestamp(), day_end.timestamp(), limit=1000)
-                         if hasattr(memory, "turns_between") else memory.recent_turns(limit * 4))
-                turns = turns[-min(limit, 20):]
-            else:
-                turns = memory.search_turns(query, limit=limit) if hasattr(memory, "search_turns") else memory.recent_turns(limit * 4)
+        if scope in ("all", "conversations"):
+            turns = memory.search_turns(query, limit=limit) if hasattr(memory, "search_turns") else memory.recent_turns(limit * 4)
             result["conversation_matches"] = [
-                {"role": t.get("role"), "text": t.get("text", t.get("content", ""))[:220 if scope == "today" else 700],
+                {"role": t.get("role"), "text": t.get("text", t.get("content", ""))[:700],
                  "time": datetime.fromtimestamp(t["ts"]).isoformat(timespec="minutes") if t.get("ts") else None}
-                for t in turns
+                for t in turns[:limit]
             ]
-        if scope == "today" and app is not None:
-            today = datetime.now().date()
-            events = []
-            for item in list(getattr(app, "_title_session_events", []) or []):
-                if not isinstance(item, dict) or item.get("private_context"):
-                    continue
-                try:
-                    stamp = float(item.get("at", 0))
-                    if datetime.fromtimestamp(stamp).date() != today:
-                        continue
-                except (TypeError, ValueError, OSError, OverflowError):
-                    continue
-                if item.get("app_category") in ("Private", "Meeting"):
-                    continue
-                events.append({
-                    "time": datetime.fromtimestamp(stamp).isoformat(timespec="minutes"),
-                    "app": str(item.get("app_name") or "")[:64],
-                    "title_clue": str(item.get("window_title") or "")[:180],
-                    "user_said": str(item.get("user") or "")[:180],
-                })
-            result["session_events"] = events[-12:]
-        result["notice"] = ("Results come from this Study Buddy profile's local database; a today search may also include "
-                             "temporary, privacy-filtered window clues from the current app session. Other apps' chats are not accessible.")
+        result["notice"] = "Only information present in this Study Buddy profile's local database is searchable; other apps' chats are not accessible."
         return result
 
     def save_memory(text, kind="fact"):
@@ -314,44 +282,27 @@ def build_builtin_tool_registry(core, app=None, capability_registry=None):
         if sys.platform != "win32":
             return {"available": False, "awareness_enabled": True,
                     "scope": "Desktop Awareness currently requires Windows; no live foreground context is available on this platform."}
-        # Reuse the desktop composition root's source selection. It knows when the
-        # Buddy window itself is foreground and can then provide the latest safe
-        # external window instead of reporting the Buddy chat as the user's activity.
+        try:
+            idle = app._idle_seconds()
+        except Exception:
+            idle = None
         snapshot = None
-        provider = getattr(app, "_desktop_context_for_chat", None)
-        if callable(provider):
-            try:
-                raw = provider()
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(parsed, dict):
-                    snapshot = parsed
-                else:
-                    return {"available": False, "awareness_enabled": enabled,
-                            "scope": str(raw or "Live desktop context is unavailable.")}
-            except Exception:
-                return {"available": False, "awareness_enabled": enabled,
-                        "scope": "The shared live desktop context could not be read."}
-        if snapshot is None:
-            # Preserve compatibility with non-GUI/test compositions that only
-            # expose the context engine.
-            try:
-                idle = app._idle_seconds()
-            except Exception:
-                idle = None
-            try:
-                engine = getattr(app, "context_engine", None)
-                if engine is not None:
-                    snapshot = engine.observe(idle_seconds=idle).safe_summary()
-            except Exception:
-                snapshot = None
-        category = (snapshot or {}).get("app_category")
-        idle = (snapshot or {}).get("idle_seconds")
+        try:
+            engine = getattr(app, "context_engine", None)
+            if engine is not None:
+                snapshot = engine.observe(idle_seconds=idle).safe_summary()
+        except Exception:
+            snapshot = None
+        try:
+            category = app._foreground_category()
+        except Exception:
+            category = (snapshot or {}).get("app_category")
         return {"available": bool(snapshot is not None or category),
                 "awareness_enabled": enabled,
                 "foreground_category": category,
                 "idle_seconds": idle,
                 "snapshot": snapshot,
-                "scope": "Current foreground app/category or, while Study Buddy is foreground, the most recently observed safe external window; title clues only, no screen pixels or browser page content"}
+                "scope": "Foreground app/category and a privacy-filtered window title as clues only; no screen pixels or browser page content"}
 
     def speak_text(text):
         if app is None or not callable(getattr(app, "_speak", None)):
@@ -365,9 +316,9 @@ def build_builtin_tool_registry(core, app=None, capability_registry=None):
 
     add("get_capabilities", "Inspect the assistant's real registered tools, available features, and current runtime status: which systems are active, ready, unavailable, or connected, including local AI, memory, tasks, reminders, camera, desktop awareness, voice, and proactive features. Use for capability/tool inventory questions or to verify whether a feature is available.", {}, [], capabilities, "local_ai", "Introspection")
     add("get_user_profile", "Retrieve saved USER profile fields, such as the user's stated name. Do not use this to retrieve the assistant/Buddy name; that is not a fact about the user.", {}, [], profile, "memory", "Memory")
-    add("search_memory", "Search locally saved conversation turns, facts, notes, and current-session observations for recall or summaries of past and today's activity.",
-        {"query": {"type": "string", "description": "Topic or keyword; empty for a broad search"},
-         "scope": {"type": "string", "enum": ["all", "conversations", "today", "notes", "facts"], "description": "Memory source or time range; today includes today's retained chat and current-session observations"},
+    add("search_memory", "Search this Study Buddy profile's saved facts, notes, summaries, and past or previous conversation turns/chats. Use when asked what we discussed, what the user told you before, earlier conversations, what happened in a past chat, or what you remember. Always search before claiming you do not remember. For a broad request about previous chats with no topic, pass query='' and scope='conversations' to retrieve recent saved turns. For a topic, search the topic terms. Use list_tasks for structured task status/history; task records are not inferred from chat transcripts.",
+        {"query": {"type": "string", "description": "Topic or keyword to search; use an empty string for recent history"},
+         "scope": {"type": "string", "enum": ["all", "conversations", "notes", "facts"], "description": "Which memory store to search"},
          "limit": {"type": "integer", "description": "Maximum results from 1 to 20"}}, ["query"], search_memory, "memory", "Memory")
     add("save_memory", "Save a non-sensitive user-provided fact or note for future conversations.",
         {"text": {"type": "string", "description": "Exact information the user asked to remember"},

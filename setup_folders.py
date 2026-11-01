@@ -15,12 +15,12 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 PROFILE = sys.argv[1] if len(sys.argv) > 1 else "hamim"
 
 DEFAULT_SETTINGS = {
-    "model_chat": "qwen2.5:1.5b",
+    "model_chat": "llama3.2:3b",
     "model_embed": "nomic-embed-text",
-    "ollama_url": "http://127.0.0.1:11434",
-    "ollama_options": {"num_gpu": 0, "num_thread": 4, "num_ctx": 3072, "num_predict": 40, "temperature": 0.2},
+    "ollama_url": "http://localhost:11434",
+    "ollama_options": {"num_gpu": 0, "num_thread": 4, "num_ctx": 3072, "num_predict": 96, "temperature": 0.2},
     "strictness": "medium",
-    "recent_turns": 1,
+    "recent_turns": 3,
     "retrieved_notes": 2,
     "max_prompt_facts": 4,
     "tool_max_rounds": 2,
@@ -32,11 +32,6 @@ DEFAULT_SETTINGS = {
     "speech_model": "tiny",
     "awareness_enabled": True,
     "proactive_enabled": True,
-    "proactive_daily_limit": 0,
-    "proactive_app_seconds": 25,
-    "proactive_title_cooldown_seconds": 0,
-    "proactive_same_title_repeat_minutes": 5,
-    "initiative_daily_cap": 0,
     "proactive_cooldown_minutes": 180,
     "proactive_min_user_quiet_seconds": 90,
     "proactive_switch_stability_seconds": 25,

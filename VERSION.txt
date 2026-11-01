@@ -1,10 +1,8 @@
 Study Buddy v11 — Phase 2: A Companion That Reaches Out Well
 
 Schema: 3
-Verification: Automated tests were not run for the 2026-10-31 latency changes. With the final `127.0.0.1` endpoint, a warm in-memory ChatCore small-talk run on an i5-8265U showed first text in 0.42 s and a full reply in 1.64 s. A controlled Ollama stream request's headers arrived in 0.62 s via `127.0.0.1` versus 2.13 s via `localhost`. These local samples are environment-specific; full GUI/tray interaction after the model change remains unverified.
+Verification: The 2026-10-29 stabilization build passed 369 tests under Python 3.12 (0 skipped, 0 failed), plus syntax compilation and a 30-day deterministic simulation. A local llama3.2:3b title-check-in component smoke call passed in 12.6 seconds warm. The 2026-10-30 companion-conversation/background-review changes have not yet been validated. Full Windows 10/11 + Tk GUI + tray interaction remains unverified.
 
 Phase 2: deadline/task open loops; opt-in title-free rhythm learning; adaptive feedback; one unified gated initiative policy; deterministic nudge templates/dialogs; non-title daily caps and per-trigger repeat rules; title deduplication by context without a blanket hourly cooldown; nudge explainability/log; privacy cascades/retention; schema v3; Phase 1 privacy/extraction/parser/response-mode review fixes.
 
 Conversation update: one deterministic English day question; open-ended, user-led chat; redesigned non-clinical My World sections; consent-gated memory review after 90 seconds without chat/model activity, processing up to 60 retained messages per pass.
-
-Latency update: serialize model use, expose queue/load/prompt/generation timings, and close cancellable low-priority review/title streams as soon as the user types or sends chat. The background agent skips model consolidation while the desktop app is open; the short deterministic greeting and capped response modes avoid extra startup/model work. Default local inference now uses Qwen 2.5 1.5B on CPU for faster responses; the configured model remains editable and the startup fixer warms it before the GUI opens.

@@ -6,9 +6,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "app")
-TESTS = os.path.join(APP, "tests")
 sys.path.insert(0, APP)
-sys.path.insert(0, TESTS)
 
 GUI_MODULES = {
     "test_dashboard_architecture",
@@ -21,7 +19,7 @@ HAS_TK = importlib.util.find_spec("tkinter") is not None
 loader = unittest.TestLoader()
 suite = unittest.TestSuite()
 skipped = []
-for filename in sorted(os.listdir(TESTS)):
+for filename in sorted(os.listdir(APP)):
     if not filename.startswith("test_") or not filename.endswith(".py"):
         continue
     module_name = filename[:-3]

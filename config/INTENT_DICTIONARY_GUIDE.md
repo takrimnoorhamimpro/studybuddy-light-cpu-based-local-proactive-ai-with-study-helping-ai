@@ -31,7 +31,7 @@ At least one term from the first group **and** at least one term from the second
 2. Add synonyms to the existing arrays or add an intent entry following the same structure.
 3. Keep `global_exclusions` and `exclude_phrases` for educational/negated phrases to avoid false positives.
 4. Validate that the file is still valid JSON. Restart Study Buddy to reload the dictionary.
-5. Run `py -3.12 scripts/run_tests.py` from the project folder.
+5. Run `python -m unittest discover -s app -p "test_*.py"` from the project folder.
 
 Use simple synonyms in `keyword_groups`. Only edit `direct_patterns` if you need to change which complete requests bypass confirmation. Regex patterns must be valid Python regular expressions encoded as JSON strings (so each backslash is written as `\\`).
 

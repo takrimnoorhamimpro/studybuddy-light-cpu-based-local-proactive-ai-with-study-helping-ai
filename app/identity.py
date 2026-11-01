@@ -1,17 +1,19 @@
 """
-identity.py  -  Extract explicit profile names and build a role map for the LLM.
+identity.py  -  Who is the USER and who is BUDDY? Plain code, no AI.
 
-Conversation replies stay with the LLM. Saved names are supplied as structured
-role context so the model can use them naturally in the current conversation.
+A tiny model (llama3.2:1b) mixes up "my name" and "your name". So names are
+NOT left to the model. Code does three things:
+  1. learn names from text ("my name is X", "call me X", "your name is Y")
+  2. answer "what is my name / your name" directly
+  3. give the model one short, clear line about both names
 """
 
-import json
 import re
 
 _NAME = r"([A-Za-z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,2})"
 # (?i:...) = case-insensitive only for the lead-in words; the name itself
 # keeps its capitals so "Takrim Noor Hamim, you" does not swallow "you".
-_CALL_ME = re.compile(r"(?i:\b(?:call me|you can call me))\s+" + _NAME)
+_CALL_ME = re.compile(r"(?i:\b(?:call me|called me|you can call me))\s+" + _NAME)
 _MY_NAME = re.compile(r"(?i:\bmy name(?: is|'s)|\bi am called|\bpeople call me)\s+" + _NAME)
 _I_AM_NOT = re.compile(r"(?i:\bi am)\s+" + _NAME + r"\s*,?\s+not\s+" + _NAME + r"\b")
 _YOUR_NAME = re.compile(
@@ -26,6 +28,13 @@ _NICKNAME = re.compile(
 _BAD_NAMES = {"not", "a", "an", "the", "just", "so", "very", "is", "also", "still",
               "my", "your", "you", "me", "and", "but", "what", "who"}
 
+_ASK_MY = re.compile(
+    r"(?i:\b(?:what|say|tell|know|remember|recall|repeat|spell)\b[^.?!]*\bmy\s+(?:\w+\s+){0,2}?na(?:me|em)\b"
+    r"|\bwho am i\b)")
+_ASK_YOUR = re.compile(
+    r"(?i:\b(?:what|say|tell|know)\b[^.?!]*\byour\s+(?:\w+\s+){0,2}?name\b"
+    r"|\bwho are you\b|\bdo you (?:have|got) (?:a |any )?name\b"
+    r"|\bwhat should i call you\b|\bhave you (?:picked|chosen) (?:a )?name\b)")
 # "choose your name", "pick a different name for you", "pick a name"
 _PICK = re.compile(
     r"(?i:\b(?:pick|choose|select|decide|come up with|make up|give yourself)\b[^.?!]*\bname\b)")
@@ -107,14 +116,38 @@ def extract_nickname(text):
     return nickname
 
 
+def is_name_question(text):
+    """Returns (asks_my_name, asks_your_name)."""
+    return bool(_ASK_MY.search(text)), bool(_ASK_YOUR.search(text))
+
+
+def name_answer(text, user_name, buddy_name):
+    """Fixed answer to a name question, or None if it is not one."""
+    mine, yours = is_name_question(text)
+    if not (mine or yours):
+        return None
+    bits = []
+    if yours:
+        bits.append("My name is " + buddy_name + "." if buddy_name else
+                    "I haven't picked my name yet.")
+    if mine:
+        bits.append("Your name is " + user_name + "." if user_name else
+                    "I don't know your name yet. What should I call you?")
+    return " ".join(bits)
+
+
 def name_line(user_name, buddy_name):
-    """Render the saved names as role data rather than additional prompt rules."""
-    roles = {}
-    if buddy_name:
-        roles["assistant"] = str(buddy_name)
+    """One short, clear line for the model prompt (or empty)."""
+    bits = []
     if user_name:
-        roles["user"] = str(user_name)
-    return "IDENTITY DATA: " + json.dumps(roles, ensure_ascii=False, separators=(",", ":")) if roles else ""
+        bits.append("The USER's name is " + user_name + ". Call them " + user_name + ".")
+        if not buddy_name:
+            bits.append("YOU are not " + user_name + ". You have not chosen a name yet.")
+    if buddy_name:
+        bits.append("YOUR chosen name is " + buddy_name + ".")
+    if user_name and buddy_name:
+        bits.append("Never mix these up: you are " + buddy_name + ", the user is " + user_name + ".")
+    return " ".join(bits)
 
 
 def wants_buddy_to_pick_name(text):
@@ -132,3 +165,11 @@ def pick_name(text, user_name, current, rng):
     taken = {(user_name or "").lower(), (current or "").lower()}
     options = [n for n in CANDIDATES if n.lower() not in taken and n.lower() not in low]
     return rng.choice(options or CANDIDATES)
+
+
+def wrong_name_claim(reply, user_name):
+    """True if the model says the USER's name is its own ('my name is Takrim')."""
+    if not user_name:
+        return False
+    n = re.escape(user_name)
+    return bool(re.search(r"(?i)\b(?:my name is|my name's|i am|i'm|call me)\s+" + n + r"\b", reply))

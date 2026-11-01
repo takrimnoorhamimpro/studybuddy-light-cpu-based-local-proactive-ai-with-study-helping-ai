@@ -19,20 +19,18 @@ _STATUS_COLOURS = {
 ARCHITECTURE_NODES = {
     "chat": {"title": "USER CHAT", "subtitle": "Input / streaming reply", "capability": None,
              "description": "The desktop chat UI accepts the user's message and streams provisional model text as it arrives. Final output is safety-checked before being committed."},
-    "intent": {"title": "CHAT ROUTER", "subtitle": "Editable keyword dictionary · fast paths", "capability": None,
-                "description": "Every incoming chat turn reaches ChatCore routing. The editable keyword dictionary helps route intent; greetings, exact commands and pending dialogs can be handled locally, while other turns go to the model and may expose a small set of relevant tools."},
+    "intent": {"title": "INTENT + DIALOG", "subtitle": "Editable keyword dictionary", "capability": None,
+                "description": "A lightweight, configurable dictionary detects likely task/reminder/timer intents. Ambiguous requests enter a stateful YES/NO/details flow; clear commands continue directly."},
     "llm": {"title": "PRIMARY LLM", "subtitle": "Ollama · one chat model", "capability": "local_ai",
             "description": "The only primary language model. It handles normal conversation and native tool calling. No second chat LLM or required embedding model is part of this architecture."},
-    "tools": {"title": "TOOL EXECUTOR", "subtitle": "Only when a tool is needed", "capability": "agent_tool_calling",
-              "description": "The model may request a registered native tool. Python validates and runs the handler, then returns its result. Many chat turns do not enter this path."},
+    "tools": {"title": "TOOL EXECUTOR", "subtitle": "Validated Python handlers", "capability": "agent_tool_calling",
+              "description": "Registered native tools are validated and executed by Python. The executor returns real results; it cannot claim an action succeeded without confirmation."},
     "store": {"title": "SQLITE STATE", "subtitle": "Durable data · explicit recall", "capability": "memory",
-              "description": "SQLite stores conversation turns, My World facts, notes, tasks, completion state and reminders. Recent current-chat history is included in dialogue; relevant consented My World facts may be added as a small bounded context, while notes and older transcripts are retrieved through explicit recall."},
-    "review": {"title": "MY WORLD REVIEW", "subtitle": "Opt-in · after a quiet pause", "capability": "memory_review",
-                "description": "When relationship memory consent is enabled, an idle worker reviews up to 60 retained chat turns after 90 seconds without chat or model work. It pauses when the user returns, and saves only clear, non-sensitive details supported by the user's own words."},
+              "description": "SQLite stores conversation turns, profile facts, notes, tasks, completion state and reminders. Past chats and notes are not automatically injected into small talk; memory retrieval happens only for an explicit recall request or a user-selected memory workflow."},
     "desktop": {"title": "DESKTOP SIGNALS", "subtitle": "Fresh app / safe title", "capability": "desktop_awareness",
                  "description": "A lightweight collector supplies coarse foreground-application, idle-time and privacy-filtered window-title metadata. An explicit desktop question may use a recent in-memory external-window snapshot when Study Buddy itself is foreground. It never reads page contents or screen pixels."},
-    "proactive": {"title": "PROACTIVE AGENT", "subtitle": "Low-priority · opt-in triggers", "capability": "proactive",
-                  "description": "The scheduler considers enabled deadline, study-rhythm, session-return, wind-down and window-title triggers, then applies quiet-hour, cooldown, consent and boundary checks. For title-based assistant guesses, the LLM gets fresh sanitized app/title metadata plus safety and character instructions, but no past chats, tasks, reminders or saved notes. A delivered check-in can add one-turn context to the user's reply."},
+    "proactive": {"title": "PROACTIVE AGENT", "subtitle": "Low-priority · current title only", "capability": "proactive",
+                  "description": "The background generator receives only a fresh, privacy-filtered current app/window title. It does not receive past chats, assistant guesses, reminders, task titles or saved notes. Generic titles yield no guess; unsupported title claims are discarded; it yields to interactive chat and obeys persistent cooldown/privacy checks."},
     "camera": {"title": "CAMERA FEATURE", "subtitle": "Explicit consent only", "capability": "camera_preview",
                 "description": "Camera preview starts only after explicit permission. Optional expression features run locally when their model is installed; raw frames are not sent to the chat LLM."},
     "voice": {"title": "VOICE", "subtitle": "Optional speech I/O", "capability": "voice_input",
@@ -41,13 +39,13 @@ ARCHITECTURE_NODES = {
 
 
 class IntelligenceDashboard:
-    def __init__(self, parent, registry, monitor, memory=None, model_name="qwen2.5:1.5b", intent_dictionary_path=None,
+    def __init__(self, parent, registry, monitor, memory=None, model_name="llama3.2:3b", intent_dictionary_path=None,
                  core=None, settings=None):
         self.parent = parent
         self.registry = registry
         self.monitor = monitor
         self.memory = memory
-        self.model_name = str(model_name or "qwen2.5:1.5b")
+        self.model_name = str(model_name or "llama3.2:3b")
         self.intent_dictionary_path = intent_dictionary_path
         self.core = core
         self.settings = settings or {}
@@ -59,10 +57,6 @@ class IntelligenceDashboard:
         self.window.minsize(850, 590)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self._after_id = None
-        self._last_trace_events = []
-        self._last_trace_nodes = set()
-        self._last_trace_edges = set()
-        self._last_trace_text = "No correlated chat path captured yet."
         self._build()
         self.refresh()
         self._schedule_refresh()
@@ -75,7 +69,7 @@ class IntelligenceDashboard:
         title_box = ttk.Frame(header)
         title_box.pack(side="left", fill="x", expand=True)
         ttk.Label(title_box, text="Intelligence Center", font=("Segoe UI", 17, "bold")).pack(anchor="w")
-        ttk.Label(title_box, text="Live component status and the latest observed chat route",
+        ttk.Label(title_box, text="Live capabilities, tool execution and system awareness",
                   foreground="#64748b").pack(anchor="w")
         ttk.Button(header, text="Refresh now", command=self.refresh).pack(side="right", padx=(8, 0))
 
@@ -87,7 +81,7 @@ class IntelligenceDashboard:
         self.memory_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.overview_tab, text="Overview & Graph")
         self.notebook.add(self.capabilities_tab, text="Capabilities")
-        self.notebook.add(self.activity_tab, text="Runtime Activity")
+        self.notebook.add(self.activity_tab, text="Tool Activity")
         self.notebook.add(self.memory_tab, text="Memory & Privacy")
         self._build_overview()
         self._build_capabilities()
@@ -100,8 +94,7 @@ class IntelligenceDashboard:
     def _metric(self, parent, title, key):
         frame = ttk.LabelFrame(parent, text=title, padding=(12, 8))
         value = tk.StringVar(value="—")
-        value_font = ("Segoe UI", 14, "bold") if key == "llm_latency" else ("Segoe UI", 20, "bold")
-        ttk.Label(frame, textvariable=value, font=value_font).pack(anchor="w")
+        ttk.Label(frame, textvariable=value, font=("Segoe UI", 20, "bold")).pack(anchor="w")
         self.metric_vars[key] = value
         return frame
 
@@ -110,16 +103,16 @@ class IntelligenceDashboard:
         metrics = ttk.Frame(self.overview_tab)
         metrics.pack(fill="x", pady=(0, 10))
         for title, key in (("Capabilities", "capabilities"), ("Active", "active"),
-                           ("Events retained", "calls"), ("Failed events", "failed"),
-                           ("Chat LLM median / p90", "llm_latency")):
+                           ("Tool calls", "calls"), ("Failed calls", "failed"),
+                           ("Avg LLM latency", "llm_latency")):
             self._metric(metrics, title, key).pack(side="left", fill="x", expand=True, padx=(0, 7))
 
-        graph_frame = ttk.LabelFrame(self.overview_tab, text="System map + last chat trace · click a node for details", padding=8)
+        graph_frame = ttk.LabelFrame(self.overview_tab, text="Interactive runtime architecture · click any node", padding=8)
         graph_frame.pack(fill="both", expand=True)
         self.graph = tk.Canvas(graph_frame, height=390, background="#0b1220", highlightthickness=0)
         self.graph.pack(fill="both", expand=True)
         self.graph.bind("<Configure>", lambda _e: self._draw_graph())
-        self.graph_caption = tk.StringVar(value="Gold edges show the latest traced chat path. Gray edges show supported possible flows.")
+        self.graph_caption = tk.StringVar(value="One primary LLM · editable intent dictionary · validated tools · SQLite · low-priority proactive path")
         ttk.Label(self.overview_tab, textvariable=self.graph_caption, foreground="#64748b",
                   wraplength=960, justify="left").pack(anchor="w", fill="x", pady=(7, 4))
         self.graph_detail_var = tk.StringVar(value="Click a node to inspect its role and live status.")
@@ -194,10 +187,6 @@ class IntelligenceDashboard:
             return "active"
         if node_id == "llm" and ("agent_tool_calling" in running_tools or "local_ai" in running_tools):
             return "running"
-        if node_id == "review" and "memory_review" in running_tools:
-            return "running"
-        if node_id == "proactive" and "proactive_request" in running_tools:
-            return "running"
         if cap_id and cap_id in by_id:
             status = by_id[cap_id].get("status", "unavailable")
             if cap_id in running_tools:
@@ -206,149 +195,6 @@ class IntelligenceDashboard:
         if node_id == "proactive":
             return by_id.get("proactive_agent", {}).get("status", "available")
         return "available"
-
-    @staticmethod
-    def _trace_route(events):
-        """Map correlated, privacy-safe events to the path taken by the latest chat."""
-        if not events or not any(event.get("tool_id") == "chat_request" for event in events):
-            return set(), set(), "No correlated chat path captured yet."
-
-        nodes = {"chat", "intent"}
-        edges = {"chat_router"}
-        ordered = [event for event in events if event.get("tool_id") != "chat_request"]
-
-        model_events = sorted(
-            (event for event in ordered if event.get("tool_id") == "local_ai"),
-            key=lambda event: float(event.get("started_at") or 0),
-        )
-        # OllamaClient.chat() delegates to chat_completion(); when both wrappers
-        # are monitored, collapse their nearly identical nested timing records.
-        unique_model_events = []
-        for event in model_events:
-            if unique_model_events:
-                previous = unique_model_events[-1]
-                same_start = abs(float(event.get("started_at") or 0) - float(previous.get("started_at") or 0)) < 0.02
-                same_duration = abs(int(event.get("duration_ms") or 0) - int(previous.get("duration_ms") or 0)) < 1500
-                if same_start and same_duration:
-                    continue
-            unique_model_events.append(event)
-
-        if unique_model_events:
-            nodes.add("llm")
-            edges.add("router_llm")
-
-        tool_events = [event for event in ordered if event.get("source") == "LLM tool call"]
-        if tool_events:
-            nodes.add("tools")
-            edges.add("llm_tools")
-            if len(unique_model_events) > 1 and unique_model_events[-1].get("started_at", 0) > tool_events[0].get("started_at", 0):
-                edges.add("tools_llm")
-            else:
-                edges.add("tools_chat")
-
-        memory_context_events = [event for event in ordered if event.get("tool_id") == "flow_memory_context"]
-        storage_events = [event for event in ordered if (
-            event.get("source") == "Memory"
-            or event.get("tool_id") in {"memory", "tasks", "reminders", "flow_store", "flow_memory_context"}
-        )]
-        if storage_events:
-            nodes.add("store")
-            if tool_events:
-                edges.add("tools_store")
-            elif (not memory_context_events
-                  or any(event.get("tool_id") == "flow_store" for event in storage_events)):
-                edges.add("router_store")
-
-        if memory_context_events:
-            nodes.add("store")
-            nodes.add("llm")
-            edges.add("store_llm")
-
-        desktop_events = [event for event in ordered if event.get("tool_id") in {"desktop_awareness", "flow_desktop"}]
-        if desktop_events:
-            nodes.add("desktop")
-            if tool_events:
-                edges.add("tools_desktop")
-            if unique_model_events:
-                edges.add("desktop_llm")
-
-        camera_events = [event for event in ordered if event.get("tool_id") in {"camera_preview", "flow_camera"}]
-        if camera_events:
-            nodes.add("camera")
-            if tool_events:
-                edges.add("tools_camera")
-            elif any(event.get("tool_id") == "camera_preview" for event in camera_events):
-                edges.add("chat_camera")
-            if unique_model_events:
-                edges.add("camera_llm")
-
-        proactive_events = [event for event in ordered if event.get("tool_id") == "flow_proactive"]
-        if proactive_events:
-            nodes.add("proactive")
-            edges.add("proactive_chat")
-            if unique_model_events:
-                edges.add("proactive_llm")
-
-        voice_events = [event for event in ordered if event.get("tool_id") == "flow_voice"]
-        if voice_events:
-            nodes.add("voice")
-            edges.add("voice_chat")
-
-        labels = {
-            "chat": "Chat", "intent": "Router", "llm": "LLM", "tools": "Tools",
-            "store": "Local data", "desktop": "Desktop context", "camera": "Camera feature",
-            "voice": "Voice input", "proactive": "Proactive context",
-        }
-        path = (["voice", "chat", "intent"] if voice_events else ["chat", "intent"])
-        for event in sorted(ordered, key=lambda item: (float(item.get("started_at") or 0), int(item.get("id") or 0))):
-            tool_id = event.get("tool_id")
-            source = event.get("source")
-            node = None
-            if tool_id == "local_ai":
-                node = "llm"
-            elif source == "LLM tool call":
-                node = "tools"
-                if tool_id == "desktop_awareness":
-                    path.append("desktop")
-                elif tool_id == "camera_preview":
-                    path.append("camera")
-            elif tool_id == "camera_preview":
-                node = "camera"
-            elif tool_id in {"flow_desktop", "flow_camera", "flow_proactive", "flow_voice", "flow_store", "flow_memory_context"}:
-                node = {"flow_desktop": "desktop", "flow_camera": "camera",
-                        "flow_proactive": "proactive", "flow_voice": "voice",
-                        "flow_store": "store", "flow_memory_context": "store"}.get(tool_id)
-            elif source == "Memory" or tool_id in {"memory", "tasks", "reminders"}:
-                node = "store"
-            if node == "voice" and voice_events:
-                continue  # Voice is the input source before the chat node.
-            if node and (not path or path[-1] != node):
-                path.append(node)
-        if path[-1] not in {"chat", "intent"}:
-            path.append("chat")
-        path_text = " → ".join(labels.get(node, node.title()) for node in path)
-        return nodes, edges, "Last chat path: " + path_text
-
-    @staticmethod
-    def _format_ms(value):
-        if value is None:
-            return "—"
-        value = max(0, float(value))
-        return f"{value / 1000:.1f}s" if value >= 1000 else f"{int(value)}ms"
-
-    def _llm_metrics_detail(self):
-        llm_client = getattr(self.core, "llm", None) if self.core is not None else None
-        metrics = getattr(llm_client, "last_metrics", {}) if llm_client is not None else {}
-        if not isinstance(metrics, dict) or not metrics:
-            return ""
-        parts = []
-        for label, key in (("queue", "queue_wait_ms"), ("load", "load_ms"),
-                           ("prompt", "prompt_eval_ms"), ("generation", "generation_ms")):
-            if metrics.get(key) is not None:
-                parts.append(label + " " + self._format_ms(metrics.get(key)))
-        if metrics.get("tokens_per_second") is not None:
-            parts.append(f"{metrics['tokens_per_second']} tok/s")
-        return (" Latest model call: " + ", ".join(parts) + ".") if parts else ""
 
     def _select_graph_node(self, node_id):
         if node_id not in ARCHITECTURE_NODES:
@@ -363,8 +209,7 @@ class IntelligenceDashboard:
         live_detail = by_id.get(spec.get("capability"), {}).get("detail", "") if spec.get("capability") else ""
         model_text = f" Primary model: {self.model_name}." if node_id == "llm" else ""
         dictionary_text = (f" Editable file: {self.intent_dictionary_path}." if node_id == "intent" and self.intent_dictionary_path else "")
-        llm_metrics_text = self._llm_metrics_detail() if node_id == "llm" else ""
-        self.graph_detail_var.set(f"{spec['title']} · {status_text}. {spec['description']}{model_text}{dictionary_text} {live_detail}{llm_metrics_text}".strip())
+        self.graph_detail_var.set(f"{spec['title']} · {status_text}. {spec['description']}{model_text}{dictionary_text} {live_detail}".strip())
 
     def _draw_graph(self):
         canvas = self.graph
@@ -384,45 +229,35 @@ class IntelligenceDashboard:
             "intent": (center_x, 98),
             "llm": (center_x, 166),
             "tools": (center_x, 238),
-            "store": (center_x, min(height - 55, 330)),
+            "store": (center_x, min(height - 28, 330)),
             "desktop": (left_x, 155),
-            "review": (left_x, 330),
             "proactive": (right_x, 155),
             "camera": (left_x, 260),
             "voice": (right_x, 260),
         }
         sizes = {"chat": (184, 44), "intent": (220, 46), "llm": (220, 48), "tools": (205, 46),
-                 "store": (255, 48), "desktop": (174, 54), "review": (198, 54), "proactive": (184, 54),
+                 "store": (255, 48), "desktop": (174, 54), "proactive": (184, 54),
                  "camera": (174, 54), "voice": (174, 54)}
         rects = {}
         for node_id, (x, y) in positions.items():
             w, h = sizes[node_id]
             rects[node_id] = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
         self._node_rects = rects
-        canvas.create_text(12, 10, text="SYSTEM MAP  ·  BORDER = LIVE STATUS  ·  GOLD = LAST CHAT PATH  ·  GRAY = POSSIBLE FLOW", anchor="nw",
+        canvas.create_text(12, 10, text="LIVE SYSTEM FLOW  ·  BORDER = STATE  ·  CLICK A NODE FOR DETAILS", anchor="nw",
                            fill="#94a3b8", font=("Segoe UI", 8, "bold"))
 
-        # These are supported possible connections. The gold overlay is derived
-        # from actual, correlated events for the most recent chat request.
+        # Draw edges before nodes so arrowheads terminate at node borders visually.
         edges = [
-            ("chat_router", "chat", "intent", "both", None, None),
-            ("router_llm", "intent", "llm", "both", None, None),
-            ("llm_tools", "llm", "tools", "both", None, None),
-            ("tools_store", "tools", "store", "both", None, None),
-            ("store_llm", "store", "llm", "last", (4, 3), "memory_llm"),
-            ("store_review", "store", "review", "both", (3, 3), None),
-            ("review_llm", "review", "llm", "both", (4, 3), "review_lane"),
-            ("router_store", "intent", "store", "both", (3, 3), "left_lane"),
-            ("tools_chat", "tools", "chat", "last", (3, 3), "left_lane"),
-            ("desktop_llm", "desktop", "llm", "both", (4, 3), None),
-            ("tools_desktop", "tools", "desktop", "both", (4, 3), None),
-            ("chat_camera", "chat", "camera", "last", (3, 3), "left_lane"),
-            ("desktop_proactive", "desktop", "proactive", "last", (3, 3), "bottom_lane"),
-            ("proactive_llm", "proactive", "llm", "both", (4, 3), None),
-            ("proactive_chat", "proactive", "chat", "last", (4, 3), "right_lane"),
-            ("tools_camera", "tools", "camera", "both", (4, 3), None),
-            ("camera_llm", "camera", "llm", "last", (4, 3), None),
-            ("voice_chat", "voice", "chat", "both", (3, 3), "voice_lane"),
+            ("chat", "intent", "#64748b", None),
+            ("intent", "llm", "#60a5fa", None),
+            ("llm", "tools", "#60a5fa", None),
+            ("tools", "store", "#34d399", None),
+            ("tools", "llm", "#94a3b8", (4, 3)),
+            ("desktop", "llm", "#a78bfa", None),
+            ("desktop", "proactive", "#a78bfa", (3, 3)),
+            ("proactive", "llm", "#fbbf24", (4, 3)),
+            ("camera", "tools", "#64748b", None),
+            ("voice", "chat", "#64748b", None),
         ]
         def edge_points(rect_a, rect_b):
             ax, ay = (rect_a[0] + rect_a[2]) / 2, (rect_a[1] + rect_a[3]) / 2
@@ -436,56 +271,13 @@ class IntelligenceDashboard:
             tb = min(bw / abs(dx) if dx else float("inf"), bh / abs(dy) if dy else float("inf"))
             return ax + dx * ta, ay + dy * ta, bx - dx * tb, by - dy * tb
 
-        for edge_id, source, target, arrow, dash, route in edges:
+        for source, target, colour, dash in edges:
             a, b = rects[source], rects[target]
-            if route == "left_lane":
-                lane = center_x - 125
-                x1, y1 = a[0], (a[1] + a[3]) / 2
-                x2, y2 = b[0], (b[1] + b[3]) / 2
-                points = (x1, y1, lane, y1, lane, y2, x2, y2)
-            elif route == "bottom_lane":
-                outside_left = left_x - 110
-                outside_right = right_x + 110
-                route_y = height - 20
-                x1, y1 = a[0], (a[1] + a[3]) / 2
-                x2, y2 = b[2], (b[1] + b[3]) / 2
-                points = (x1, y1, outside_left, y1, outside_left, route_y,
-                          outside_right, route_y, outside_right, y2, x2, y2)
-            elif route == "right_lane":
-                outside = min(width - 14, right_x + 110)
-                x1, y1 = a[2], (a[1] + a[3]) / 2
-                x2, y2 = b[2], (b[1] + b[3]) / 2
-                points = (x1, y1, outside, y1, outside, y2, x2, y2)
-            elif route == "voice_lane":
-                outside = width - 12
-                x1, y1 = a[2], (a[1] + a[3]) / 2
-                x2, y2 = b[2], (b[1] + b[3]) / 2
-                points = (x1, y1, outside, y1, outside, y2, x2, y2)
-            elif route == "review_lane":
-                outside = left_x - 110
-                x1, y1 = a[0], (a[1] + a[3]) / 2
-                x2, y2 = b[0], (b[1] + b[3]) / 2
-                corridor_y = b[3] + 12
-                points = (x1, y1, outside, y1, outside, corridor_y, x2, corridor_y, x2, y2)
-            elif route == "memory_llm":
-                lane = center_x - 125
-                x1, y1 = a[0], (a[1] + a[3]) / 2
-                x2, y2 = b[0], (b[1] + b[3]) / 2
-                points = (x1, y1, lane, y1, lane, y2, x2, y2)
-            else:
-                x1, y1, x2, y2 = edge_points(a, b)
-                points = (x1, y1, x2, y2)
-            observed = edge_id in self._last_trace_edges
-            background_active = (
-                (edge_id in {"store_review", "review_llm"} and "memory_review" in running_tools)
-                or (edge_id in {"desktop_proactive", "proactive_llm"} and "proactive_request" in running_tools)
-            )
-            edge_colour = "#c084fc" if background_active else ("#fbbf24" if observed else "#3b4b62")
-            kwargs = {"fill": edge_colour,
-                      "width": 3 if (observed or background_active) else (1 if dash else 1.5), "arrow": arrow}
+            x1, y1, x2, y2 = edge_points(a, b)
+            kwargs = {"fill": colour, "width": 2 if dash is None else 1, "arrow": "last"}
             if dash:
                 kwargs["dash"] = dash
-            canvas.create_line(*points, **kwargs)
+            canvas.create_line(x1, y1, x2, y2, **kwargs)
 
         for node_id, (x, y) in positions.items():
             spec = ARCHITECTURE_NODES[node_id]
@@ -494,15 +286,13 @@ class IntelligenceDashboard:
             selected = node_id == self.selected_node_id
             if selected:
                 border = "#fbbf24"
-            fill = "#27304a" if node_id == "review" and "memory_review" in running_tools else (
-                "#203654" if node_id in self._last_trace_nodes else "#162338")
             w, h = sizes[node_id]
             tags = (f"node:{node_id}", "architecture_node")
-            canvas.create_rectangle(x-w/2, y-h/2, x+w/2, y+h/2, fill=fill,
+            canvas.create_rectangle(x-w/2, y-h/2, x+w/2, y+h/2, fill="#162338",
                                     outline=border, width=3 if selected else 2, tags=tags)
             if node_id == "llm":
                 title = f"PRIMARY LLM · {self.model_name}"
-                title = title if len(title) < 33 else f"PRIMARY LLM · {self.model_name[:15]}…"
+                title = title if len(title) < 33 else "PRIMARY LLM · Llama 3.2 3B"
             else:
                 title = spec["title"]
             subtitle = spec["subtitle"]
@@ -515,7 +305,7 @@ class IntelligenceDashboard:
             canvas.tag_bind(f"node:{node_id}", "<Leave>", lambda _event: canvas.configure(cursor=""))
 
         canvas.create_text(width - 10, height - 7,
-                           text="Gold = last chat path   ·   Purple = active background work   ·   Gray = possible route",
+                           text="Solid = request/data flow   ·   Dashed = feedback/background path",
                            anchor="se", fill="#94a3b8", font=("Segoe UI", 7))
         # Keep the detail pane synchronized after periodic live refreshes.
         if hasattr(self, "graph_detail_var"):
@@ -524,8 +314,7 @@ class IntelligenceDashboard:
             live_detail = by_id.get(spec.get("capability"), {}).get("detail", "") if spec.get("capability") else ""
             model_text = f" Primary model: {self.model_name}." if self.selected_node_id == "llm" else ""
             dictionary_text = (f" Editable file: {self.intent_dictionary_path}." if self.selected_node_id == "intent" and self.intent_dictionary_path else "")
-            llm_metrics_text = self._llm_metrics_detail() if self.selected_node_id == "llm" else ""
-            self.graph_detail_var.set(f"{spec['title']} · {status}. {spec['description']}{model_text}{dictionary_text} {live_detail}{llm_metrics_text}".strip())
+            self.graph_detail_var.set(f"{spec['title']} · {status}. {spec['description']}{model_text}{dictionary_text} {live_detail}".strip())
 
     def refresh(self):
         if not self.window.winfo_exists():
@@ -537,24 +326,34 @@ class IntelligenceDashboard:
         self.metric_vars["active"].set(str(active))
         self.metric_vars["calls"].set(str(stats["total"]))
         self.metric_vars["failed"].set(str(stats["failed"]))
-        trace_reader = getattr(self.monitor, "latest_chat_trace", None)
-        self._last_trace_events = trace_reader() if callable(trace_reader) else []
-        self._last_trace_nodes, self._last_trace_edges, self._last_trace_text = self._trace_route(self._last_trace_events)
         latency = self.monitor.latency_summary("local_ai") if hasattr(self.monitor, "latency_summary") else {"samples": 0, "average_ms": None, "last_ms": None}
         average = latency.get("average_ms")
-        median = latency.get("median_ms")
-        p90 = latency.get("p90_ms")
-        if median is not None and p90 is not None:
-            self.metric_vars["llm_latency"].set(f"{self._format_ms(median)} / {self._format_ms(p90)}")
+        llm_client = getattr(self.core, "llm", None) if self.core is not None else None
+        llm_last_metrics = getattr(llm_client, "last_metrics", {}) if llm_client is not None else {}
+        last_request_ms = llm_last_metrics.get("request_ms") if isinstance(llm_last_metrics, dict) else None
+        if average is not None:
+            self.metric_vars["llm_latency"].set(f"{average} ms avg")
+        elif last_request_ms is not None:
+            self.metric_vars["llm_latency"].set(f"{last_request_ms} ms last")
         else:
             self.metric_vars["llm_latency"].set("No data yet")
-        avg_text = (f"Chat LLM calls (newest {latency.get('samples', 0)} successful): "
-                    f"mean {self._format_ms(average)}, median {self._format_ms(median)}, "
-                    f"p90 {self._format_ms(p90)}, last {self._format_ms(latency.get('last_ms'))}"
-                    if average is not None else "No completed LLM call has been measured yet.")
+        agent = getattr(self.core, "tool_orchestrator", None) if self.core is not None else None
+        base_mode = getattr(agent, "retrieval_mode", self.settings.get("tool_retrieval_mode", "unknown"))
+        mode = ("editable dictionary + BM25 fallback" if agent and getattr(agent, "route_config", None)
+                else base_mode)
+        route = list(getattr(agent, "last_route", []) or []) if agent else []
+        rounds = getattr(agent, "last_model_rounds", None) if agent else None
+        calls = getattr(agent, "last_tool_calls", None) if agent else None
+        route_text = ", ".join(route) if route else "none on last request"
+        measured_rounds = isinstance(rounds, int) and rounds > 0
+        round_text = str(rounds) if measured_rounds else "not yet measured"
+        call_text = str(calls) if measured_rounds and calls is not None else "not yet measured"
+        avg_text = (f"{average} ms average over {latency.get('samples', 0)} measured calls" if average is not None
+                    else (f"last request {last_request_ms} ms (not an average)" if last_request_ms is not None
+                          else "no measured LLM latency yet"))
         self.graph_caption.set(
-            f"{self._last_trace_text} · {avg_text} · "
-            f"Telemetry retains up to 2,500 recent events; currently {stats['total']} stored, {stats['failed']} failed."
+            f"Primary model: {self.model_name} · tool routing: {mode} · last routed tools: {route_text} · "
+            f"last tool calls/rounds: {call_text}/{round_text} · LLM: {avg_text}"
         )
 
         selected = self.cap_tree.selection()

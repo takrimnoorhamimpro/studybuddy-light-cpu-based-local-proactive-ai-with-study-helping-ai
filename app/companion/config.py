@@ -8,14 +8,13 @@ DEFAULTS = {
     "consent_daily_cap": 3, "candidate_queue_max": 5,
     "ttl_days_by_kind": {"deadline":45,"area":45,"goal":90,"schedule":90,"preference":None,"interest":None},
     "rejected_cooldown_days": 90,
-    "response_modes": {"quick":20,"chat":40,"deep":96},
+    "response_modes": {"quick":64,"chat":110,"deep":170},
     "prompt_token_limit": 1800,
     "initiative_quiet_default": "23:00-07:00", "loop_escalation_days": [3, 1, 0],
-    "loop_morning_default": "09:00",
-    "trigger_base_value": {"open_loop_due": 1.0, "usual_study_start": 0.7, "session_return": 0.35, "wind_down": 0.2, "title_clue": 1.0},
+    "loop_morning_default": "09:00", "trigger_base_value": {"open_loop_due": 1.0, "usual_study_start": 0.7, "session_return": 0.35, "wind_down": 0.2, "title_clue": 1.0},
     "trigger_threshold": 0.05, "acceptance_floor": 0.15, "annoyance_per_nudge": 0.08, "annoyance_per_ignore": 0.12, "trigger_cooldown_minutes": {"open_loop_due":0,"usual_study_start":1380,"session_return":1380,"wind_down":1380,"title_clue":0}, "ignore_window_minutes": 15,
     "reply_window_minutes": 10, "events_retention_days": 90, "rhythm_half_life_days": 14,
-    "rhythm_min_days": 5, "rhythm_min_minutes": 30, "daily_cap_default": 0,
+    "rhythm_min_days": 5, "rhythm_min_minutes": 30, "daily_cap_default": 5,
 }
 
 def _bounded_int(value, default, low, high):
@@ -58,7 +57,7 @@ def load_config(path):
     config["prompt_token_limit"]=_bounded_int(config.get("prompt_token_limit"),1800,256,1800)
     config["trigger_threshold"]=_bounded_float(config.get("trigger_threshold"),0.05,0.0,10.0)
     config["acceptance_floor"]=_bounded_float(config.get("acceptance_floor"),0.15,0.01,1.0)
-    for key,default,low,high in (("events_retention_days",90,1,3650),("rhythm_half_life_days",14,1,365),("rhythm_min_days",5,5,60),("rhythm_min_minutes",30,1,10000),("daily_cap_default",0,0,5),("ignore_window_minutes",15,1,120),("reply_window_minutes",10,1,120)):
+    for key,default,low,high in (("events_retention_days",90,1,3650),("rhythm_half_life_days",14,1,365),("rhythm_min_days",5,5,60),("rhythm_min_minutes",30,1,10000),("daily_cap_default",5,0,5),("ignore_window_minutes",15,1,120),("reply_window_minutes",10,1,120)):
         config[key]=_bounded_int(config.get(key),default,low,high)
     if not isinstance(config.get("loop_escalation_days"),list): config["loop_escalation_days"]=[3,1,0]
     else: config["loop_escalation_days"]=sorted({max(0,min(365,int(x))) for x in config["loop_escalation_days"] if str(x).lstrip('-').isdigit()},reverse=True) or [3,1,0]

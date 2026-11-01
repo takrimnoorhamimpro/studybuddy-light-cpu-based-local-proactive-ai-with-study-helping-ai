@@ -19,14 +19,11 @@ STRICTNESS_TEXT = {
 }
 
 CONVO_RULES = (
-    "CHAT: Warm, concise, and led by the user's conversation. "
-    "Use the visible dialogue as continuous context: resolve brief follow-ups from the preceding turns, "
-    "and when asked about something you just said, explain the evidence or reasoning behind that message. "
-    "Do not answer such a follow-up with a generic disclaimer or act as if your previous message was not said. "
-    "Use only the conversation and retrieved records as evidence about the user; do not invent their interests, favorites, history, or experiences. "
-    "If the evidence is missing, say you do not know yet. Keep advice consistent with the platform or situation the user already specified. "
-    "Never claim unprovided actions or observations. "
-    "Treat window titles as uncertain clues. Respect boundaries."
+    "CHAT RULES: Never invent a name for the user. Do not bring up sad or heavy past topics unless the user does. "
+    "Memories below are about the USER, not you. You are a companion, not a customer-service bot: have your own "
+    "reasoned opinions, be direct and concise, and never pretend to be human. "
+    "A window title is only a clue, not proof; do not swap a supplied title or user detail for another. "
+    "Be candid about uncertainty, and never claim you searched or checked something unless a tool returned it."
 )
 
 EXTRA_CARE_TEXT = (
@@ -38,17 +35,24 @@ EXTRA_CARE_TEXT = (
 
 
 def _character_text(character):
-    traits = [str(value).strip() for value in character.get("traits", [])[:5] if str(value).strip()]
-    aliases = {
-        "respect for boundaries": "respect boundaries",
-        "real friendships matter more than chatting with me": "real-life friendships",
-        "reasoned disagreement": "independent opinions",
-    }
-    values = [aliases.get(str(value).strip().casefold(), str(value).strip())
-              for value in character.get("values", [])[:4] if str(value).strip()]
-    if not traits and not values:
-        return ""
-    return "PERSONALITY: " + ", ".join(traits) + ("; values: " + ", ".join(values) if values else "")
+    """Compact character block (kept short: every token costs CPU time on each reply)."""
+    name = character.get("name")
+    lines = []
+    if name:
+        lines.append("Your chosen name is " + name + ". Keep this identity stable; do not rename yourself just because the user suggests another name.")
+    else:
+        lines.append("You do not have a name yet. If asked, say you are still choosing one.")
+    if character.get("nickname") and character.get("nickname") != name:
+        lines.append("The user sometimes calls you " + character["nickname"] + " as a nickname; this does not change your chosen name.")
+    if character.get("traits"):
+        lines.append("Your traits: " + ", ".join(character["traits"]) + ".")
+    if character.get("values"):
+        lines.append("Your values: " + ", ".join(character["values"]) + ".")
+    if character.get("speech_style"):
+        lines.append("Your speaking style: " + str(character["speech_style"]).rstrip(". ") + ".")
+    if character.get("never_change_rules"):
+        lines.append("Never change: " + "; ".join(character["never_change_rules"]) + ".")
+    return "\n".join(lines)
 
 
 def build_system_prompt(safety_core, character, strictness="medium",
@@ -56,8 +60,7 @@ def build_system_prompt(safety_core, character, strictness="medium",
                         situation_line="", extra_care=False,
                         user_name=None, buddy_name=None, persona_context="", response_mode="chat"):
     parts = [safety_core, _character_text(character), CONVO_RULES]
-    if strictness != "medium":
-        parts.append(STRICTNESS_TEXT.get(strictness, STRICTNESS_TEXT["medium"]))
+    parts.append(STRICTNESS_TEXT.get(strictness, STRICTNESS_TEXT["medium"]))
 
     names = name_line(user_name, buddy_name)
     if names:
@@ -70,7 +73,7 @@ def build_system_prompt(safety_core, character, strictness="medium",
     if persona_context:
         parts.append(str(persona_context).strip())
     if response_mode == "deep":
-        parts.append("Complete the current thought clearly in a few short paragraphs, still concise. If the preceding assistant answer was unfinished, continue it instead of restarting.")
+        parts.append("The user asked for more detail; answer clearly in a few short paragraphs, still concise.")
     if situation_line:
         parts.append("Situation: " + situation_line)
     if extra_care:

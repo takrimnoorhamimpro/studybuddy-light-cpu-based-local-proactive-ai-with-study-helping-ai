@@ -292,16 +292,6 @@ class Memory:
         return [dict(r) for r in rows]
 
     @_db_locked
-    def turns_between(self, start_ts, end_ts, limit=100):
-        """Return retained turns in a time range, oldest first."""
-        limit = max(1, min(int(limit), 1000))
-        rows = self.db.execute(
-            "SELECT id, ts, role, text FROM turns WHERE ts>=? AND ts<? ORDER BY id ASC LIMIT ?",
-            (float(start_ts), float(end_ts), limit),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    @_db_locked
     def search_turns(self, query="", limit=12):
         """Rank retained conversation turns with BM25-style lexical retrieval.
 
@@ -368,50 +358,6 @@ class Memory:
                 scored.append((score, int(item["id"]), item))
         scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
         return [row[2] for row in scored[:limit]]
-
-    @_db_locked
-    def related_turns(self, query, recent_count=8, limit=8):
-        """Retrieve older user/assistant exchanges related to the current message.
-
-        BM25 finds candidate turns; adjacent persisted user/assistant pairs preserve
-        enough dialogue to make a match interpretable. Recent exchanges are already
-        supplied by the live chat loop, so this returns only older pairs.
-        """
-        terms = _keywords(query, limit=12)
-        if len(terms) < 2:
-            return []
-        try:
-            recent_count = max(0, min(int(recent_count), 200))
-            limit = max(2, min(int(limit), 16))
-        except (TypeError, ValueError):
-            recent_count, limit = 8, 8
-        latest = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM turns").fetchone()[0]
-        cutoff = max(0, int(latest) - recent_count)
-        candidates = self.search_turns(query, limit=min(48, limit * 6))
-        selected = {}
-        for candidate in candidates:
-            match_id = int(candidate.get("id", 0))
-            if not match_id or match_id >= cutoff:
-                continue
-            rows = self.db.execute(
-                "SELECT id, ts, role, text FROM turns WHERE id BETWEEN ? AND ? ORDER BY id ASC",
-                (max(1, match_id - 1), match_id + 1),
-            ).fetchall()
-            for left, right in zip(rows, rows[1:]):
-                if (left["role"] != "user" or right["role"] != "assistant"
-                        or match_id not in (int(left["id"]), int(right["id"]))):
-                    continue
-                if float(right["ts"]) - float(left["ts"]) > 6 * 3600:
-                    continue
-                selected[int(left["id"])] = dict(left)
-                selected[int(right["id"])] = dict(right)
-                break
-            if len(selected) >= limit:
-                break
-        return [
-            {"role": item["role"], "content": item["text"]}
-            for _turn_id, item in sorted(selected.items())
-        ][-limit:]
 
     @_db_locked
     def delete_turn(self, turn_id):

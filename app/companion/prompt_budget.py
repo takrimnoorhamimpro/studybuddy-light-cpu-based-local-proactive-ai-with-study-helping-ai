@@ -28,20 +28,26 @@ class PromptBudget:
                 if current_persona in system: system=system.replace(current_persona,"",1)
                 current_persona=""
                 truncated=True
-        # Trim complete exchanges, never leave an orphaned user or assistant
-        # message and never feed the model a cut-off sentence as its context.
-        while estimate()>limit and turns:
-            if (len(turns) >= 2
-                    and turns[0].get("role") == "user"
-                    and turns[1].get("role") == "assistant"):
-                del turns[:2]
-            else:
-                turns.pop(0)
-            truncated=True
+        # Drop oldest turns, preserving at least the most recent turn if one exists.
+        while estimate()>limit and len(turns)>1:
+            turns.pop(0); truncated=True
+        # If the one retained turn is itself unusually long, shorten that turn as a last
+        # history-only measure while preserving one history message and the full user text.
+        if estimate()>limit and turns:
+            original=str(turns[-1].get("content", ""))
+            low,high=0,len(original)
+            best=""
+            while low<=high:
+                mid=(low+high)//2
+                turns[-1]["content"]=original[:mid]
+                if estimate()<=limit:
+                    best=original[:mid]; low=mid+1
+                else:
+                    high=mid-1
+            turns[-1]["content"]=best; truncated=True
         # Optional context lines may be removed; safety, language, character, and user text stay.
         if estimate()>limit:
-            for marker in ("Situation: ", "CURRENT DESKTOP OBSERVATION", "RECENT WINDOW OBSERVATION",
-                           "PREVIOUS PROACTIVE MESSAGE", "RETRIEVED LOCAL MEMORY"):
+            for marker in ("Situation: ", "CURRENT DESKTOP CONTEXT", "ONE-TURN PROACTIVE REPLY CONTEXT"):
                 while estimate()>limit and marker in system:
                     idx=system.find(marker)
                     start=system.rfind("\n\n", 0, idx)

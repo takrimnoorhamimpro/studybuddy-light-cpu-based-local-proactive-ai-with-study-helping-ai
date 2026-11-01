@@ -151,17 +151,6 @@ def build_default_registry(app) -> CapabilityRegistry:
         state["detail"] = "Persistent reminders use the shared SQLite database and scheduler" if state["status"] == "active" else state["detail"]
         return state
 
-    def my_world_review():
-        pc = getattr(app, "personal_companion", None)
-        if not pc or pc.setting("relationship_memory_consent", "") != "yes":
-            return {"status": "disabled", "detail": "Background review needs explicit personal-memory consent"}
-        if (str(pc.setting("relationship_opt_out", "0")).lower() in ("1", "true", "yes", "on")
-                or str(pc.setting("tier_facts", "1")).lower() in ("0", "false", "off", "no")):
-            return {"status": "disabled", "detail": "Personal memory review is paused in Settings"}
-        if getattr(app, "_memory_review_running", False):
-            return {"status": "active", "detail": str(getattr(app, "_memory_review_status", "Reviewing recent chat"))}
-        return {"status": "available", "detail": "Reviews up to 60 retained turns after 90 quiet seconds; pauses when chat resumes"}
-
     def focus_timer():
         if getattr(app, "timer_running", False):
             return {"status": "active", "detail": f"Timer running · {app._format_time(app.timer_remaining)} remaining"}
@@ -187,7 +176,6 @@ def build_default_registry(app) -> CapabilityRegistry:
     add("local_ai", "Local AI / Ollama", "AI", "Local language model connection and response generation", ollama)
     add("agent_tool_calling", "LLM Tool Calling", "Agent", "Ollama selects registered tools; allow-listed executor returns results to the model", agent_tool_calling)
     add("memory", "Long-term Memory", "Memory", "SQLite profile, facts, notes and conversation history", lambda: CapabilityRegistry._memory_probe(app))
-    add("memory_review", "My World Review", "Memory", "Opt-in quiet-period curation of recent chat into My World", my_world_review)
     add("tasks", "Tasks", "Productivity", "Create, list, complete and delete tasks", tasks)
     add("reminders", "Reminders", "Productivity", "Persistent reminders and due-time notifications", reminders)
     add("focus_timer", "Focus Timer", "Productivity", "Pomodoro and custom-length focus timer", focus_timer)

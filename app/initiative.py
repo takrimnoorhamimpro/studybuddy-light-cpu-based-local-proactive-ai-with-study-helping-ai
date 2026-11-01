@@ -21,7 +21,7 @@ class InitiativeEngine:
             decision=self.policy.evaluate(now=now,ctx={'app_category':'Other'},state={
                 'last_interaction_ts':self.last_interaction_ts,'last_nudge_ts':max(self.last_nudge,float(self.core.personal_companion.setting('initiative_last_nudge_ts','0') or 0)),'pause_until':self.dismiss_until,'cli_mode':True,
                 'session_return':bool(snap.get('session_return')),'proactive_enabled':self.settings.get('proactive_enabled',True),
-                'daily_cap':int(self.settings.get('initiative_daily_cap',0))})
+                'daily_cap':int(self.settings.get('initiative_daily_cap',3))})
             if not decision or decision.needs_llm: return None
             self._pending_decision=decision
             return decision.text
@@ -35,8 +35,7 @@ class InitiativeEngine:
             self.last_signature=signature; self.last_signature_since=now; return None
         if s.get('app_seconds',0)<int(self.settings.get('proactive_app_seconds',25)): return None
         if now-self.last_signature_since<int(self.settings.get('proactive_stability_seconds',20)): return None
-        daily_limit=max(0,int(self.settings.get('proactive_daily_limit',0)))
-        if now<self.dismiss_until or now-self.last_nudge<int(self.settings.get('proactive_cooldown_seconds',1800)) or (daily_limit>0 and self.daily_count>=daily_limit): return None
+        if now<self.dismiss_until or now-self.last_nudge<int(self.settings.get('proactive_cooldown_seconds',1800)) or self.daily_count>=int(self.settings.get('proactive_daily_limit',3)): return None
         self.last_nudge=now; self.daily_count+=1
         # Deliberately do not feed prior chat history into proactive generations.
         situation=self.monitor.situation_line(s)

@@ -23,7 +23,6 @@ from intelligence import ToolMonitor, build_default_registry
 from intelligence.dashboard import IntelligenceDashboard
 from intelligence.capability_context import build_capability_context
 from agent import ToolOrchestrator, build_builtin_tool_registry
-from companion.response_mode import RESPONSE_EFFORT_BUDGETS
 
 MEMORY_REVIEW_QUIET_SECONDS = 90
 
@@ -44,13 +43,9 @@ class StudyBuddyApp:
                 self._desktop_mutex = None
         self.root_dir = ROOT
         self.settings = read_settings()
-        if self.settings.get("response_effort") not in RESPONSE_EFFORT_BUDGETS:
-            self.settings["response_effort"] = "Medium"
-        self._saved_response_effort = self.settings["response_effort"]
         self.ollama_available = None
         self._ollama_probe_running = False
         self.voice_listening = False
-        self._pending_voice_transcript = None
         profile = self.settings.get("profile", "hamim")
         self.user_dir = os.path.join(ROOT, "users", profile)
         self.memory = Memory(os.path.join(self.user_dir, "memory.db"))
@@ -67,7 +62,6 @@ class StudyBuddyApp:
         self.events = queue.Queue()
         self.core.timer_callback = lambda seconds, label: self.events.put(("set_chat_timer", int(seconds), str(label)))
         self.busy = False
-        self._active_chat_cancel_event = None
         self.closing = False
         self.awareness_enabled = bool(self.settings.get("awareness_enabled", False))
         self.voice_enabled = bool(self.settings.get("voice_enabled", False))
@@ -100,32 +94,19 @@ class StudyBuddyApp:
             global_cooldown_seconds=0,
             same_app_cooldown_seconds=0,
             attempt_cooldown_seconds=0,
-            daily_limit=0,
+            daily_limit=min(5, max(1, int(self.settings.get("proactive_daily_limit", 5)))),
         )
         self.last_context_signature = None
         self.last_context_since = time.time()
         self.last_nudged_signature = None
-        # One title-context nudge per foreground visit. The signature is a digest,
-        # so raw window titles are not retained in these tracking sets.
+        # One title-context nudge per distinct app/title during this app session.
+        # The signature is a digest, so raw window titles are not retained here.
         self._seen_title_contexts = set()
         self._delivered_title_contexts = set()
-        self._title_context_last_shown = {}
-        self._title_context_last_attempt = {}
-        self._title_context_last_message = {}
-        self._title_context_checkin_count = {}
-        self._title_context_unanswered_repeats = {}
-        self._title_context_last_user_reply = {}
-        self._title_context_recent_exchange = {}
-        self._title_session_events = []
-        self._title_session_recap_worker_running = False
-        self._title_session_recap_attempt_at = 0.0
-        self._title_session_recap_retry_at = 0.0
-        self._title_session_recap_last_shown_at = 0.0
-        self._title_session_recap_batch_id = 0
-        self._title_session_recap_active_id = 0
-        self._active_chat_title_signature = None
-        self._active_chat_title_context = None
-        self._active_chat_title_user_text = ""
+        # Window check-in tracking: signature -> timing record (no raw titles kept).
+        self._window_track = {}
+        self._last_window_nudge_ts = 0.0
+        self._last_title_nudge_text = ""
         self._pause_hint_shown_session = False
         self.closed_task_reminder = ""
         self.last_reply = ""
@@ -133,7 +114,6 @@ class StudyBuddyApp:
         self._last_entry_activity_ts = 0.0
         self.last_turn_completed_ts = self.last_interaction_ts
         self.session_started_at = self.last_interaction_ts
-        self._has_user_chatted_this_session = False
         self._phase2_previous_session = float(self.personal_companion.setting("initiative_last_session_ts", "0") or 0)
         self._phase2_session_return = self.last_interaction_ts - self._phase2_previous_session >= 8*3600 if self._phase2_previous_session else False
         self.personal_companion.set_setting("initiative_last_session_ts", str(self.last_interaction_ts))
@@ -171,7 +151,7 @@ class StudyBuddyApp:
                 self.core.llm, self.core.tool_registry, monitor=self.intelligence_monitor,
                 max_rounds=int(self.settings.get("tool_max_rounds", 2)),
                 max_calls_per_turn=int(self.settings.get("tool_max_calls_per_turn", 4)),
-                max_routed_tools=int(self.settings.get("tool_retrieval_max_tools", 2)),
+                max_routed_tools=int(self.settings.get("tool_retrieval_max_tools", 4)),
                 retrieval_mode=self.settings.get("tool_retrieval_mode", "bm25"),
                 routing_config_path=os.path.join(ROOT, "config", "intent_dictionary.json"),
             )
@@ -218,7 +198,7 @@ class StudyBuddyApp:
         hello = (f"Hi! I'm {self.core.buddy_name}. I'm here. I run locally through Ollama.\n\n"
                  "Camera privacy: camera access is off unless you enable it in Settings. You can say 'look at me' or 'turn on camera' to request access. "
                  "I may ask permission in a relevant conversation, but I will never activate the camera without your clear yes. "
-                 "If you allow it, optional facial-feature analysis runs locally when its model is installed; raw camera images or video are not sent to the chat model or saved. "
+                 "If you allow it, optional facial-feature analysis runs locally when its model is installed; raw camera images or video are not sent to Llama or saved. "
                  "You can say 'stop camera' at any time. Facial signals are only rough clues, not proof of how you feel.\n\n"
                  "You can ask in your own words to save a note, add/show/complete tasks, set reminders, "
                  "start a custom-length focus timer or Pomodoro, and list pending reminders. For example: "
@@ -241,104 +221,117 @@ class StudyBuddyApp:
         self.proactive_availability_switch.bind("<space>", self._toggle_proactive_availability)
         self.proactive_availability_switch.bind("<Return>", self._toggle_proactive_availability)
         self._draw_proactive_availability_switch()
+        # Reply-length slider (controls max tokens per reply; Auto = adaptive modes)
+        token_frame=ttk.Frame(self.root, padding=(12,0,12,2)); token_frame.pack(fill="x")
+        ttk.Label(token_frame, text="Reply length").pack(side="left")
+        _saved_tokens=0
+        try: _saved_tokens=int(self.settings.get("reply_token_limit") or 0)
+        except (TypeError, ValueError): _saved_tokens=0
+        self.token_auto_var=tk.BooleanVar(value=_saved_tokens<=0)
+        self.token_value_var=tk.IntVar(value=max(32,min(1024,_saved_tokens)) if _saved_tokens>0 else 110)
+        self.token_label_var=tk.StringVar()
+        self.token_scale=ttk.Scale(token_frame, from_=32, to=1024, orient="horizontal", command=self._on_token_slider)
+        self.token_scale.set(self.token_value_var.get())
+        self.token_scale.pack(side="left", fill="x", expand=True, padx=8)
+        self.token_scale.bind("<ButtonRelease-1>", lambda e: self._save_token_setting())
+        self.token_scale.bind("<KeyRelease>", lambda e: self._save_token_setting())
+        ttk.Label(token_frame, textvariable=self.token_label_var, width=14).pack(side="left")
+        ttk.Checkbutton(token_frame, text="Auto", variable=self.token_auto_var, command=self._on_token_auto).pack(side="left", padx=(6,0))
+        ttk.Button(token_frame, text="Auto-tune", command=self.auto_tune_hardware).pack(side="left", padx=(8,0))
+        self._refresh_token_widgets()
+        self.hardware_label_var=tk.StringVar(value=self._hardware_summary())
+        ttk.Label(self.root, textvariable=self.hardware_label_var, foreground="#8293a8", font=("Segoe UI",8), padding=(12,0,12,2)).pack(fill="x")
         bottom=ttk.Frame(self.root, padding=(12,0,12,8)); bottom.pack(fill="x")
-        input_panel=ttk.Frame(bottom); input_panel.pack(side="left", fill="both", expand=True)
-        self.entry=tk.Text(input_panel, height=3, wrap="word", font=("Segoe UI",10)); self.entry.pack(fill="both", expand=True)
+        self.entry=tk.Text(bottom, height=3, wrap="word", font=("Segoe UI",10)); self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Control-Return>", self._send_event)
         self.entry.bind("<KeyPress>", self._mark_entry_activity, add="+")
-        effort_row=ttk.Frame(input_panel); effort_row.pack(fill="x", pady=(2,0))
-        ttk.Label(effort_row, text="Reply budget").pack(side="left", padx=(0,4))
-        effort_names=list(RESPONSE_EFFORT_BUDGETS)
-        current_effort=str(self.settings.get("response_effort", "Medium"))
-        self._response_effort_names=effort_names
-        self.response_effort_var=tk.IntVar(value=effort_names.index(current_effort))
-        self.response_effort_detail=tk.StringVar()
-        self.response_effort_scale=tk.Scale(
-            effort_row, from_=0, to=len(effort_names)-1, resolution=1,
-            orient="horizontal", showvalue=0, length=210, sliderlength=16,
-            highlightthickness=0, command=self._on_response_effort_change,
-        )
-        self.response_effort_scale.set(self.response_effort_var.get())
-        self.response_effort_scale.pack(side="left", fill="x", expand=True)
-        self.response_effort_scale.bind("<ButtonRelease-1>", self._save_response_effort)
-        self.response_effort_scale.bind("<KeyRelease>", self._save_response_effort, add="+")
-        ttk.Label(effort_row, textvariable=self.response_effort_detail, width=22).pack(side="left", padx=(4,0))
-        ttk.Label(input_panel,text="Low  ·  Medium  ·  High  ·  Extra  ·  Max  ·  Insane",
-                  anchor="center",font=("Segoe UI",7)).pack(fill="x")
-        self._update_response_effort_label(current_effort)
         controls=ttk.Frame(bottom); controls.pack(side="left", padx=(8,0), fill="y")
         self.send_btn=ttk.Button(controls,text="Send",command=self.send); self.send_btn.pack(fill="x",pady=2)
-        self.stop_btn=ttk.Button(controls,text="Stop",command=self._stop_chat_generation,state="disabled"); self.stop_btn.pack(fill="x",pady=2)
         ttk.Button(controls,text="🎙 Voice",command=self.voice_input).pack(fill="x",pady=2)
         ttk.Button(controls,text="Speak reply",command=self.speak_last).pack(fill="x",pady=2)
         self.status=tk.StringVar(value="Starting…")
         ttk.Label(self.root,textvariable=self.status,anchor="w",padding=(12,5)).pack(fill="x")
         self.entry.focus_set()
 
-    def _update_response_effort_label(self, name):
-        name = name if name in RESPONSE_EFFORT_BUDGETS else "Medium"
-        self.response_effort_detail.set(f"{name} · up to {RESPONSE_EFFORT_BUDGETS[name]} tokens")
-
-    def _on_response_effort_change(self, raw_value):
+    def _hardware_summary(self):
+        profile=getattr(self.core,"hardware",None)
+        if not profile:
+            return "Hardware auto-tuning is off or unavailable."
         try:
-            index=max(0,min(len(self._response_effort_names)-1,int(round(float(raw_value)))))
-            name=self._response_effort_names[index]
-        except (TypeError, ValueError):
-            return
-        self.response_effort_var.set(index)
-        self.settings["response_effort"] = name
-        self.core.settings["response_effort"] = name
-        self._update_response_effort_label(name)
+            import hardware_profile
+            return "Detected: "+hardware_profile.describe(profile, getattr(self.core.llm,"options",None))
+        except Exception:
+            return "Hardware detected."
 
-    def _save_response_effort(self, _event=None):
-        name=str(self.settings.get("response_effort", "Medium"))
-        path=os.path.join(ROOT,"config","settings.json")
-        temporary=path+".tmp"
+    def auto_tune_hardware(self):
+        """One-time benchmark of thread counts on the real model; result is saved and reused."""
+        profile=getattr(self.core,"hardware",None)
+        if not profile:
+            self._status("Auto-tune needs hardware auto-tuning enabled (settings.json: auto_hardware_tuning)."); return
+        if self.busy:
+            self._status("Wait for the current reply to finish, then run Auto-tune."); return
+        if not messagebox.askyesno("Auto-tune",
+                "Auto-tune tests a few CPU thread counts with your local model (about 1-2 minutes).\n"
+                "Chat is unavailable while it runs. Continue?", parent=self.root):
+            return
+        self.busy=True
+        self.send_btn.configure(state="disabled", text="Tuning…")
+        config_dir=os.path.join(ROOT,"config")
+        def progress(message): self.root.after(0, lambda m=message: self._status(m))
+        def worker():
+            try:
+                import hardware_profile
+                record=hardware_profile.calibrate(self.core.llm, profile, config_dir, progress=progress)
+                self.core.llm.options["num_thread"]=int(record["num_thread"])
+                self.root.after(0, lambda: self.hardware_label_var.set(self._hardware_summary()))
+            except Exception as exc:
+                self.root.after(0, lambda e=exc: self._status(f"Auto-tune failed: {e}"))
+            finally:
+                def restore():
+                    self.busy=False
+                    self.send_btn.configure(state="normal", text="Send")
+                self.root.after(0, restore)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_token_widgets(self):
+        auto=self.token_auto_var.get()
+        try: self.token_scale.state(["disabled"] if auto else ["!disabled"])
+        except Exception: pass
+        self.token_label_var.set("Auto (adaptive)" if auto else f"{self.token_value_var.get()} tokens")
+
+    def _on_token_slider(self, value):
+        try: self.token_value_var.set(int(float(value)))
+        except (TypeError, ValueError): return
+        self._refresh_token_widgets()
+        self._apply_token_setting()  # live: takes effect on the next reply
+
+    def _on_token_auto(self):
+        self._refresh_token_widgets()
+        self._apply_token_setting()
+        self._save_token_setting()
+
+    def _apply_token_setting(self):
+        value=0 if self.token_auto_var.get() else int(self.token_value_var.get())
+        self.settings["reply_token_limit"]=value
+        try: self.core.settings["reply_token_limit"]=value
+        except Exception: pass
+
+    def _save_token_setting(self):
+        self._apply_token_setting()
+        path=os.path.join(ROOT,"config","settings.json"); temporary=path+".tmp"
         try:
             with open(temporary,"w",encoding="utf-8") as stream:
-                json.dump(self.settings,stream,indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
+                json.dump(self.settings,stream,indent=2); stream.flush(); os.fsync(stream.fileno())
             os.replace(temporary,path)
         except OSError as exc:
-            previous=self._saved_response_effort
-            self.settings["response_effort"]=previous
-            self.core.settings["response_effort"]=previous
-            self.response_effort_var.set(self._response_effort_names.index(previous))
-            self.response_effort_scale.set(self.response_effort_var.get())
-            self._update_response_effort_label(previous)
-            messagebox.showerror("Reply budget",f"I couldn't save this choice:\n{exc}",parent=self.root)
-            return
-        self._saved_response_effort=name
-        self._status(f"Reply budget set to {name} (up to {RESPONSE_EFFORT_BUDGETS[name]} tokens).")
-
-    def _stop_chat_generation(self):
-        cancel_event=self._active_chat_cancel_event
-        if not self.busy or cancel_event is None or cancel_event.is_set():
-            return
-        self._cancel_background_llm_work(cancel_event)
-        self.stop_btn.configure(state="disabled",text="Stopping…")
-        self._status("Stopping the current reply…")
+            self._status(f"Could not save reply length: {exc}")
 
     def _mark_entry_activity(self, event=None):
         # Transient timestamp only: no typed text or key data is persisted.
         self._last_entry_activity_ts=time.time()
         self.last_interaction_ts=self._last_entry_activity_ts
         if self._memory_review_running:
-            self._cancel_background_llm_work(self._memory_review_cancel_event)
-        if self.proactive_worker_running:
-            self._cancel_background_llm_work(self._proactive_cancel_event)
-
-    def _cancel_background_llm_work(self, cancel_event):
-        """Signal a background model task and close its stream to free Ollama for chat."""
-        cancel_event.set()
-        llm = getattr(self.core, "llm", None)
-        cancel = getattr(llm, "cancel_active_request", None)
-        if callable(cancel):
-            try:
-                cancel(cancel_event)
-            except Exception:
-                pass
+            self._memory_review_cancel_event.set()
 
     def _append(self, who, text, tag=None):
         self.chat.configure(state="normal")
@@ -475,7 +468,7 @@ class StudyBuddyApp:
         self.proactive_pause_flow.awaiting_duration = False
         self.proactive_pause_flow.awaiting_until = 0.0
         if not enabled:
-            self._cancel_background_llm_work(self._proactive_cancel_event)
+            self._proactive_cancel_event.set()
             self._phase2_nudge_queued = False
             self._phase2_rhythm_offer_queued = False
             builder = getattr(self.core, "relationship_builder", None)
@@ -512,58 +505,33 @@ class StudyBuddyApp:
     def send(self):
         text=self.entry.get("1.0","end").strip()
         if not text or self.busy: return
-        voice_origin = text == self._pending_voice_transcript
-        self._pending_voice_transcript = None
         if self._memory_review_running:
-            self._cancel_background_llm_work(self._memory_review_cancel_event)
+            self._memory_review_cancel_event.set()
         # Interactive chat has priority over a low-priority proactive generation.
         # The proactive Ollama stream is cancelled and its provisional result dropped.
         if self.proactive_worker_running:
-            self._cancel_background_llm_work(self._proactive_cancel_event)
+            self._proactive_cancel_event.set()
         self.entry.delete("1.0","end"); self._append("You",text,"you")
         self.last_interaction_ts = time.time()
-        self._has_user_chatted_this_session = True
         pause_notice = self._update_proactive_boundary_from_user(text)
         if self._pause_reply_only:
-            with self.intelligence_monitor.request_trace():
-                if voice_origin:
-                    self.intelligence_monitor.mark_flow_node("voice")
-                event_id = self.intelligence_monitor.start(
-                    "chat_request", "Chat request", "Pause flow", "Message handled locally; text omitted",
-                )
-                self._finish_pause_flow_turn(text, pause_notice)
-                self.intelligence_monitor.finish(event_id, "success")
+            self._finish_pause_flow_turn(text, pause_notice)
             return
-        with self.intelligence_monitor.request_trace():
-            camera_command_handled = self._handle_camera_chat_command(text)
-            if camera_command_handled:
-                if voice_origin:
-                    self.intelligence_monitor.mark_flow_node("voice")
-                event_id = self.intelligence_monitor.start(
-                    "chat_request", "Chat request", "Camera command", "Message handled by local camera policy; text omitted",
-                )
-                self.intelligence_monitor.finish(event_id, "success")
-        if camera_command_handled:
+        if self._handle_camera_chat_command(text):
             return
-        self._active_chat_title_context = self._title_context_for_pending_chat()
-        self._active_chat_title_signature = self._title_signature_for_context(self._active_chat_title_context)
-        self._active_chat_title_user_text = text
-        self._active_chat_cancel_event=threading.Event()
-        self.busy=True; self.send_btn.configure(state="disabled", text="Thinking…"); self.stop_btn.configure(state="normal",text="Stop"); self.face_mode="thinking"; self.activity_mode="thinking"
+        self.busy=True; self.send_btn.configure(state="disabled", text="Thinking…"); self.face_mode="thinking"; self.activity_mode="thinking"
         thinking_status = "Thinking…"
         if pause_notice:
             thinking_status += " · check-in status updated"
         self._status(thinking_status)
-        threading.Thread(target=self._reply_worker,args=(text,pause_notice,voice_origin,self._active_chat_cancel_event),daemon=True).start()
+        threading.Thread(target=self._reply_worker,args=(text,pause_notice),daemon=True).start()
 
-    def _reply_worker(self, text, pause_notice=None, voice_origin=False, cancel_event=None):
+    def _reply_worker(self, text, pause_notice=None):
         start = time.time()
         try:
             stream_state = {"text": "", "safety_blocked": False, "safety_candidate": ""}
 
             def on_token(chunk):
-                if cancel_event is not None and cancel_event.is_set():
-                    return False
                 if not chunk:
                     return True
                 # Check the whole provisional output before making each new chunk
@@ -583,36 +551,10 @@ class StudyBuddyApp:
 
             on_token.safety_blocked = False
             on_token.safety_candidate = ""
-            on_token.cancel_event = cancel_event
-            with self.intelligence_monitor.request_trace():
-                if voice_origin:
-                    self.intelligence_monitor.mark_flow_node("voice")
-                chat_event_id = self.intelligence_monitor.start(
-                    "chat_request", "Chat request", "ChatCore",
-                    "Message routed; private text omitted",
-                )
-                related_exchange = self._title_context_recent_exchange.get(
-                    self._active_chat_title_signature, []) if self._active_chat_title_signature else []
-                self.core._recent_title_context_exchange_for_turn = [
-                    {"user": item.get("user", ""), "buddy": item.get("buddy", "")}
-                    for item in related_exchange[-3:]
-                ]
-                try:
-                    result = self.core.handle_message(text, on_token=on_token)
-                except Exception:
-                    self.intelligence_monitor.finish(
-                        chat_event_id, "failed", "Unhandled chat error; details omitted for privacy",
-                    )
-                    raise
-                else:
-                    chat_failed = isinstance(result, dict) and result.get("flag") == "error"
-                    self.intelligence_monitor.finish(
-                        chat_event_id,
-                        "failed" if chat_failed else "success",
-                        "Model or chat pipeline returned an error" if chat_failed else "",
-                    )
-                finally:
-                    self.core._recent_title_context_exchange_for_turn = []
+            with self.intelligence_monitor.track(
+                "chat_request", "Chat request", "ChatCore", "Message routed; private text omitted"
+            ):
+                result = self.core.handle_message(text, on_token=on_token)
             if pause_notice:
                 reply = str(result.get("reply") or "").strip()
                 result["reply"] = (reply + "\n\n" if reply else "") + pause_notice
@@ -631,38 +573,10 @@ class StudyBuddyApp:
                 elif kind == "reply":
                     _, result, elapsed = item
                     self.last_turn_completed_ts = time.time()
-                    exchange_context = self._active_chat_title_context
-                    exchange_signature = self._active_chat_title_signature
-                    if not exchange_context:
-                        direct_context = getattr(self.core, "_last_turn_desktop_context", None)
-                        if (isinstance(direct_context, dict)
-                                and direct_context.get("window_title")
-                                and not direct_context.get("private_context")
-                                and direct_context.get("app_category") not in ("Private", "Meeting")):
-                            exchange_context = {
-                                key: str(direct_context.get(key) or "")[:limit]
-                                for key, limit in (("app_name", 80), ("app_category", 40), ("window_title", 240))
-                            }
-                            exchange_signature = self._title_signature_for_context(exchange_context)
-                    self.core._last_turn_desktop_context = {}
-                    self._remember_title_context_exchange(
-                        exchange_signature,
-                        self._active_chat_title_user_text,
-                        str(result.get("reply") or ""),
-                        exchange_context,
-                    )
-                    self._active_chat_title_signature = None
-                    self._active_chat_title_context = None
-                    self._active_chat_title_user_text = ""
                     self.busy = False
-                    self._active_chat_cancel_event = None
                     self.send_btn.configure(state="normal", text="Send")
-                    self.stop_btn.configure(state="disabled", text="Stop")
                     self.activity_mode = "idle"
-                    cancelled = result.get("flag") == "cancelled"
-                    if cancelled:
-                        self._finish_streaming_reply("", remove=True)
-                    elif not self._finish_streaming_reply(result.get("reply", "")):
+                    if not self._finish_streaming_reply(result.get("reply", "")):
                         self._append("Buddy", result.get("reply", ""), "buddy")
                     self.last_reply = result.get("reply", "")
                     if self._reply_requests_camera_permission(self.last_reply) and not self.camera_declined_this_chat:
@@ -671,21 +585,14 @@ class StudyBuddyApp:
                     flagged = result.get("flag") in ("high", "medium")
                     self.face_mode = "concerned" if flagged else "happy"
                     self.face_expression_until = time.perf_counter() + 2.4
-                    if cancelled:
-                        self._status(f"Reply stopped · {elapsed:.1f}s")
-                    elif not self.camera_consent_pending:
+                    if not self.camera_consent_pending:
                         self._status(f"{result.get('flag', 'ok')} · {elapsed:.1f}s · local model")
                     if self.voice_enabled and self.last_reply:
                         threading.Thread(target=self._speak, args=(self.last_reply,), daemon=True).start()
                 elif kind == "reply_error":
-                    self._active_chat_title_signature = None
-                    self._active_chat_title_context = None
-                    self._active_chat_title_user_text = ""
                     self._finish_streaming_reply("", remove=True)
                     self.busy = False
-                    self._active_chat_cancel_event = None
                     self.send_btn.configure(state="normal", text="Send")
-                    self.stop_btn.configure(state="disabled", text="Stop")
                     self.activity_mode = "idle"
                     self.face_mode = "concerned"
                     self.face_expression_until = time.perf_counter() + 3.0
@@ -696,8 +603,7 @@ class StudyBuddyApp:
                     router=getattr(self.core,"intent_router",None)
                     if (not self.settings.get("proactive_enabled", True)
                             or self.busy or self.proactive_worker_running or (router and router.has_pending)
-                            or (self.core.relationship_builder and self.core.relationship_builder.phase)
-                            or not self._proactive_chat_is_quiet()):
+                            or (self.core.relationship_builder and self.core.relationship_builder.phase)):
                         continue
                     if str(self.personal_companion.setting("tier_rhythm","0")).lower() not in ("0","false","off","no"):
                         continue
@@ -715,47 +621,14 @@ class StudyBuddyApp:
                     _, decision = item
                     self._phase2_nudge_queued=False
                     router = getattr(self.core, "intent_router", None)
-                    is_title_checkin = decision.trigger == "title_clue"
                     # Recheck delivery gates on the UI thread; a user turn wins over a queued nudge.
                     if (not self.settings.get("proactive_enabled", True)
                             or self.busy or self.proactive_worker_running or (router and router.has_pending)
-                            or (self.core.relationship_builder and self.core.relationship_builder.phase and not is_title_checkin)):
-                        self._release_title_checkin_attempt(decision)
-                        if decision.trigger == "session_return":
-                            self._phase2_session_return_consumed=False
-                        continue
-                    if not self._proactive_chat_is_quiet():
-                        self._release_title_checkin_attempt(decision)
-                        if decision.trigger == "session_return":
-                            self._phase2_session_return_consumed=False
-                        continue
-                    if is_title_checkin and not self._title_decision_is_fresh(decision):
-                        meta = dict(getattr(decision, "meta", {}) or {})
-                        stale_signature = self._title_context_signature(
-                            meta.get("app_name"), meta.get("app_category"), meta.get("window_title", ""))
-                        self._seen_title_contexts.discard(stale_signature)
-                        self._title_context_last_attempt.pop(stale_signature, None)
+                            or (self.core.relationship_builder and self.core.relationship_builder.phase)):
                         continue
                     if not decision.text:
                         continue
-                    if is_title_checkin:
-                        title_signature = self._title_context_signature(
-                            decision.meta.get("app_name"), decision.meta.get("app_category"),
-                            decision.meta.get("window_title"))
-                        previous_title_checkin = float(self._title_context_last_shown.get(title_signature, 0.0))
-                        repeat_minutes = max(0, min(1440, int(self.settings.get("proactive_same_title_repeat_minutes", 5))))
-                        repeat_ready = bool(not previous_title_checkin or not repeat_minutes
-                            or time.time()-previous_title_checkin >= repeat_minutes*60)
-                        if title_signature in self._delivered_title_contexts and not repeat_ready:
-                            continue
-                        if self._title_checkin_repeats_last(title_signature, decision.text):
-                            self._suppress_repeated_title_checkin(title_signature)
-                            continue
-                        self._delivered_title_contexts.add(title_signature)
-                        self._record_title_context_checkin(title_signature, decision.text)
-                        builder = self.core.relationship_builder
-                        if builder and builder.phase in ("availability", "topic_permission", "conversation"):
-                            builder.cancel()
+                    is_title_checkin = decision.trigger == "title_clue"
                     self._append("Buddy", decision.text, "buddy")
                     if is_title_checkin:
                         # Window titles are volatile context: show the prompt and
@@ -766,7 +639,6 @@ class StudyBuddyApp:
                         self.core.pending_proactive_app_name = str(decision.meta.get("app_name") or "unknown")
                         self.core.pending_proactive_app_category = str(decision.meta.get("app_category") or "Other")
                         self.core.pending_proactive_observed_at = time.time()
-                        self.core.remember_ephemeral_assistant_message(decision.text)
                     else:
                         self.core.history.append({"role":"assistant","content":decision.text})
                         self.memory.add_turn("assistant", decision.text)
@@ -798,19 +670,16 @@ class StudyBuddyApp:
                     if decision.trigger == "title_clue":
                         # The companion may be behind the app the student is using.
                         # Use the already-enabled local voice/tray channel so the
-                        # title itself is spoken, not just a generic notification.
+                        # check-in is actually noticeable outside the chat window.
                         if self.voice_enabled:
-                            spoken = str(decision.text or "").strip()
-                            if spoken:
-                                threading.Thread(target=self._speak, args=(spoken,), daemon=True).start()
+                            spoken = "I noticed another window and was curious about it."
+                            threading.Thread(target=self._speak, args=(spoken,), daemon=True).start()
                         if self.root.state() == "withdrawn" and self.tray_icon:
                             try: self.tray_icon.notify(f"{self.core.buddy_name or 'Your study buddy'} is checking whether you are free for a quick chat.", "Study Buddy")
                             except Exception: pass
                 elif kind == "proactive_skipped":
                     # No visible message is better than an irrelevant or intrusive fallback.
                     self.proactive_worker_running = False
-                    if len(item) > 2:
-                        self._release_title_checkin_attempt(item[2])
                     if not self.settings.get("proactive_enabled", True):
                         continue
                     if not self.busy:
@@ -825,50 +694,24 @@ class StudyBuddyApp:
                     category = context_parts[1] if len(context_parts) > 1 else "Other"
                     decision = context_parts[2] if len(context_parts) > 2 else None
                     self.proactive_worker_running = False
-                    is_title_checkin = bool(decision and getattr(decision, "trigger", None) == "title_clue")
                     # A just-arrived user request wins; never inject a proactive
                     # message into the middle of the interactive response.
                     if (self.busy or self._proactive_cancel_event.is_set()
                             or not self.settings.get("proactive_enabled", True)):
-                        self._release_title_checkin_attempt(decision)
-                        if decision and getattr(decision, "trigger", None) == "session_return":
-                            self._phase2_session_return_consumed=False
                         continue
-                    if not self._proactive_chat_is_quiet():
-                        self._release_title_checkin_attempt(decision)
-                        if decision and getattr(decision, "trigger", None) == "session_return":
-                            self._phase2_session_return_consumed=False
-                        continue
+                    is_title_checkin = bool(decision and getattr(decision, "trigger", None) == "title_clue")
                     if is_title_checkin and not self._title_decision_is_fresh(decision):
-                        # This visit did not produce a message. Permit a later return
-                        # to the same window to get a fresh dwell/check-in attempt.
-                        title_meta = dict(getattr(decision, "meta", {}) or {})
-                        stale_signature = self._title_context_signature(
-                            title_meta.get("app_name", app_name),
-                            title_meta.get("app_category", category),
-                            title_meta.get("window_title", ""))
-                        self._seen_title_contexts.discard(stale_signature)
-                        self._title_context_last_attempt.pop(stale_signature, None)
+                        # Keep this title marked as seen for the rest of this app
+                        # session; otherwise a quick alt-tab back to a stale context
+                        # can produce the same missed check-in over and over.
                         self._status("The window changed before I could check in, so I skipped that guess.")
                         continue
                     if is_title_checkin:
-                        title_meta = dict(getattr(decision, "meta", {}) or {})
-                        title_signature = self._title_context_signature(
-                            title_meta.get("app_name", app_name),
-                            title_meta.get("app_category", category),
-                            title_meta.get("window_title", ""))
-                        previous_title_checkin = float(self._title_context_last_shown.get(title_signature, 0.0))
-                        repeat_minutes = max(0, min(1440, int(self.settings.get("proactive_same_title_repeat_minutes", 5))))
-                        repeat_ready = bool(not previous_title_checkin or not repeat_minutes
-                            or time.time()-previous_title_checkin >= repeat_minutes*60)
-                        if title_signature in self._delivered_title_contexts and not repeat_ready:
+                        # Repeats are now scheduled by time (see _window_checkin_mode); only block an identical sentence.
+                        if text.strip().casefold() == str(self._last_title_nudge_text or "").strip().casefold():
                             self._status("Repeated window check-in suppressed.")
                             continue
-                        if self._title_checkin_repeats_last(title_signature, text):
-                            self._suppress_repeated_title_checkin(title_signature)
-                            continue
-                        self._delivered_title_contexts.add(title_signature)
-                        self._record_title_context_checkin(title_signature, text)
+                        self._last_title_nudge_text = text
                     if not is_title_checkin and self.proactive_limiter.is_duplicate(text):
                         if not self.busy:
                             self._status("Repeated check-in suppressed.")
@@ -877,13 +720,6 @@ class StudyBuddyApp:
                         if not self._pause_hint_shown_session:
                             text = text.rstrip() + " If you'd like me to leave you to focus, just say 'pause'."
                             self._pause_hint_shown_session = True
-                        self._remember_title_context_exchange(
-                            title_signature, "", "", {
-                                "app_name": (decision.meta or {}).get("app_name", app_name),
-                                "app_category": (decision.meta or {}).get("app_category", category),
-                                "window_title": (decision.meta or {}).get("window_title", ""),
-                                "checkin": text,
-                            })
                         builder = self.core.relationship_builder
                         if builder and builder.phase in ("availability", "topic_permission", "conversation"):
                             # A new stable foreground window takes priority over an
@@ -905,14 +741,17 @@ class StudyBuddyApp:
                     # Keep the exact visible message as an ephemeral hand-off for
                     # one reply. The title-only generator never receives reusable history.
                     self.core.pending_proactive_context = text
-                    if is_title_checkin:
-                        self.core.remember_ephemeral_assistant_message(text)
                     self.send_btn.configure(state="normal", text="Send")
                     self.activity_mode = "idle"
                     self._append("Buddy", text, "buddy")
                     if not is_title_checkin:
                         self.core.history.append({"role":"assistant","content":text})
                         self.memory.add_turn("assistant",text)
+                    else:
+                        # In-memory only (never saved to the database): the next reply can now see what was asked.
+                        self.core.history.append({"role":"assistant","content":text})
+                        recent = list(getattr(self.core, "recent_title_nudges", None) or [])
+                        self.core.recent_title_nudges = (recent + [text])[-3:]
                     self.core.last_initiative_nudge_id = getattr(decision,"nudge_id",None)
                     self.core.last_initiative_nudge_text = text
                     if is_title_checkin:
@@ -933,71 +772,6 @@ class StudyBuddyApp:
                     self.face_mode = "curious"
                     self.face_expression_until = time.perf_counter() + 2.2
                     self._status("Buddy started a conversation")
-                    if self.voice_enabled and text:
-                        threading.Thread(target=self._speak, args=(text,), daemon=True).start()
-                    if self.root.state() == "withdrawn" and self.tray_icon:
-                        try: self.tray_icon.notify(text[:180], "Study Buddy")
-                        except Exception: pass
-                elif kind == "title_session_recap_skipped":
-                    _, batch_id, reason = item
-                    if batch_id != self._title_session_recap_active_id:
-                        continue
-                    self._title_session_recap_worker_running = False
-                    self._title_session_recap_active_id = 0
-                    self.proactive_worker_running = False
-                    interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
-                    self._title_session_recap_retry_at = (
-                        0.0 if reason == "User chat took priority."
-                        else time.time() + min(120, max(30, interval * 15))
-                    )
-                    if not self.busy and reason != "User chat took priority.":
-                        if reason == "No useful recap could be made.":
-                            self._status("The local model could not form a clear recap; the same batch will retry shortly.")
-                        else:
-                            self._status("Window-chat recap could not finish; the same batch will retry shortly.")
-                elif kind == "title_session_recap_reply":
-                    _, text, batch_id, batch_count = item
-                    if batch_id != self._title_session_recap_active_id:
-                        continue
-                    self._title_session_recap_worker_running = False
-                    self._title_session_recap_active_id = 0
-                    self.proactive_worker_running = False
-                    router = getattr(self.core, "intent_router", None)
-                    interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
-                    latest_chat_activity = max(float(self.last_interaction_ts or 0),
-                        float(self.last_turn_completed_ts or 0), float(self._last_entry_activity_ts or 0))
-                    chat_started_during_recap = latest_chat_activity > self._title_session_recap_attempt_at
-                    if (self.busy or chat_started_during_recap or self._proactive_cancel_event.is_set() or not interval
-                            or not self.settings.get("proactive_enabled", True)
-                            or not self._proactive_chat_is_quiet()
-                            or not self.awareness_enabled or self.proactive_pause_flow.is_paused(time.time())
-                            or self.proactive_pause_flow.awaiting_duration
-                            or self._is_quiet(datetime.datetime.now().strftime("%H:%M"))
-                            or (router and router.has_pending)
-                            or (self.core.relationship_builder and self.core.relationship_builder.phase)):
-                        self._title_session_recap_retry_at = 0.0
-                        continue
-                    try:
-                        current = self.context_engine.observe(self._idle_seconds())
-                        current_safe = current.safe_summary()
-                    except Exception:
-                        current_safe = {}
-                    if current_safe.get("private_context") or current_safe.get("app_category") in ("Private", "Meeting"):
-                        self._title_session_recap_retry_at = 0.0
-                        continue
-                    self._title_session_recap_last_shown_at = time.time()
-                    del self._title_session_events[:max(0, min(len(self._title_session_events), int(batch_count)))]
-                    self.core.pending_proactive_context = text
-                    self.core.pending_proactive_kind = "title_session_recap"
-                    self.core.pending_proactive_window_title = None
-                    self.core.pending_proactive_app_name = None
-                    self.core.pending_proactive_app_category = None
-                    self.core.pending_proactive_observed_at = time.time()
-                    self._append("Buddy", text, "buddy")
-                    self.last_reply = text
-                    self.face_mode = "curious"
-                    self.face_expression_until = time.perf_counter() + 2.2
-                    self._status("A recap of your recent window-related chat")
                     if self.voice_enabled and text:
                         threading.Thread(target=self._speak, args=(text,), daemon=True).start()
                     if self.root.state() == "withdrawn" and self.tray_icon:
@@ -1123,14 +897,8 @@ class StudyBuddyApp:
                 elif kind == "voice_text":
                     _,text=item
                     self.activity_mode = "idle"
-                    if text:
-                        self._pending_voice_transcript = str(text).strip()
-                        self.entry.delete("1.0","end")
-                        self.entry.insert("1.0",text)
-                        self._status("Speech recognized. Press Send to submit.")
-                    else:
-                        self._pending_voice_transcript = None
-                        self._status("No speech detected. Try again closer to the microphone.")
+                    if text: self.entry.delete("1.0","end"); self.entry.insert("1.0",text); self._status("Speech recognized. Press Send to submit.")
+                    else: self._status("No speech detected. Try again closer to the microphone.")
                 elif kind=="error":
                     self.activity_mode = "idle"
                     messagebox.showerror("Study Buddy",item[1]); self._status("Voice feature unavailable")
@@ -1169,7 +937,6 @@ class StudyBuddyApp:
         """Connect the current ChatCore/Memory instances to observability and self-awareness."""
         self.core.capability_context_provider = self._capability_context
         self.core.capability_list_provider = self._capability_list
-        self.core.flow_event_provider = self.intelligence_monitor.mark_flow_node
         self.intelligence_monitor.instrument(
             self.core.llm, "chat", "local_ai", "Ollama chat inference", "Ollama",
             "Legacy local model request; prompt contents omitted",
@@ -1235,7 +1002,7 @@ class StudyBuddyApp:
                 pass
         self._intelligence_dashboard = IntelligenceDashboard(
             self.root, self.capability_registry, self.intelligence_monitor, self.memory,
-            model_name=self.settings.get("model_chat", "qwen2.5:1.5b"),
+            model_name=self.settings.get("model_chat", "llama3.2:3b"),
             intent_dictionary_path=os.path.join(ROOT, "config", "intent_dictionary.json"),
             core=self.core, settings=self.settings,
         )
@@ -1289,7 +1056,7 @@ class StudyBuddyApp:
                 self.face_expression_until = 0.0
             self._draw_face()
         if not self.closing:
-            self.root.after(40, self._animate_face)  # ~25 FPS for smooth idle movement
+            self.root.after(80 if (self.face_canvas and self.face_canvas.winfo_exists()) else 500, self._animate_face)  # ~12 FPS; near-idle when the face window is closed
 
     def _draw_face(self):
         c = self.face_canvas
@@ -1437,7 +1204,8 @@ class StudyBuddyApp:
             dot = int(time.perf_counter() * 3) % 3
             canvas.create_text(width - 10, 7, text="." * (dot + 1), anchor="e",
                                fill=color, font=("Segoe UI", 10, "bold"), tags=("wave",))
-        self.root.after(60, self._animate_activity)
+        # Redraw rarely when idle so the UI thread stays free while the model is generating.
+        self.root.after(500 if mode not in ("listening", "thinking", "speaking") else 100, self._animate_activity)
 
     def voice_input(self):
         if self.busy: return
@@ -1579,7 +1347,7 @@ class StudyBuddyApp:
         win.bind("<Destroy>", _unbind_settings_wheel, add="+")
 
         ttk.Label(frame, text="Local model (must already exist in Ollama)").pack(anchor="w")
-        model = tk.StringVar(value=self.settings.get("model_chat", "qwen2.5:1.5b"))
+        model = tk.StringVar(value=self.settings.get("model_chat", "llama3.2:3b"))
         ttk.Entry(frame, textvariable=model).pack(fill="x", pady=(2, 8))
 
         ttk.Separator(frame).pack(fill="x", pady=8)
@@ -1607,6 +1375,22 @@ class StudyBuddyApp:
         ttk.Checkbutton(frame, text="Speak replies automatically (English TTS)", variable=voice).pack(anchor="w", pady=2)
         ttk.Checkbutton(frame, text="Enable local desktop awareness (app, idle time and privacy-filtered window title)", variable=awareness).pack(anchor="w", pady=2)
         ttk.Checkbutton(frame, text="Allow Luna to start proactive check-ins (also controlled by the chat switch)", variable=proactive).pack(anchor="w", pady=2)
+        ttk.Label(frame, text="Window check-in timing", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(6, 0))
+        timing_vars = {}
+        for _key, _label, _default, _low, _high in (
+                ("window_checkin_new_seconds", "Comment on a NEW window after it stays open (seconds)", 15, 5, 3600),
+                ("window_checkin_same_minutes", "Check again while I stay on the SAME window, every (minutes)", 10, 1, 240),
+                ("window_checkin_return_minutes", "Check again when I RETURN to a window, after (minutes)", 5, 1, 240),
+                ("window_checkin_min_gap_seconds", "Minimum gap between any two window check-ins (seconds)", 90, 0, 3600),
+                ("window_checkin_max_followups", "Max follow-ups per window (0 = unlimited)", 0, 0, 100)):
+            _row = ttk.Frame(frame); _row.pack(fill="x", pady=1)
+            ttk.Label(_row, text=_label).pack(side="left")
+            _var = tk.StringVar(value=str(self.settings.get(_key, _default)))
+            ttk.Spinbox(_row, from_=_low, to=_high, width=7, textvariable=_var).pack(side="right")
+            timing_vars[_key] = (_var, _low, _high)
+        llm_text = tk.BooleanVar(value=bool(self.settings.get("window_checkin_llm_text", True)))
+        ttk.Checkbutton(frame, text="Let the AI write each window check-in in its own words (not a fixed template)",
+                        variable=llm_text).pack(anchor="w", pady=2)
         autostart = tk.BooleanVar(value=self.settings.get("auto_start_enabled", True))
         background_agent = tk.BooleanVar(value=self.settings.get("background_agent_enabled", True))
         ttk.Checkbutton(frame, text="Start Study Buddy when I sign in to Windows", variable=autostart).pack(anchor="w", pady=2)
@@ -1625,26 +1409,10 @@ class StudyBuddyApp:
         else:
             suggestion="Quiet-hours suggestions will appear after at least five distinct active days and enough title-free samples. Nothing is applied automatically."
         ttk.Label(frame,text=suggestion,wraplength=620).pack(anchor="w",pady=(1,5))
-        trigger_vars={}
-        window_dwell = tk.StringVar(value=str(max(5,min(600,int(self.settings.get("proactive_app_seconds",25))))) )
-        same_title_repeat = tk.StringVar(value=str(max(0,min(1440,int(self.settings.get("proactive_same_title_repeat_minutes",5))))) )
-        title_session_summary = tk.StringVar(value=str(max(0,min(1440,int(self.settings.get("proactive_title_summary_minutes",30))))) )
-        chat_quiet_period = tk.StringVar(value=str(max(15,min(3600,int(self.settings.get("proactive_min_user_quiet_seconds",180))))) )
-        quiet_row=ttk.Frame(frame); quiet_row.pack(fill="x",pady=(5,2))
-        ttk.Label(quiet_row,text="After chat, resume check-ins after (seconds)").pack(side="left")
-        ttk.Spinbox(quiet_row,from_=15,to=3600,textvariable=chat_quiet_period,width=6).pack(side="left",padx=8)
-        ttk.Label(frame,text="Before your first chat after launch, check-ins run normally.",wraplength=620).pack(anchor="w",pady=(0,3))
-        dwell_row=ttk.Frame(frame); dwell_row.pack(fill="x",pady=(5,2))
-        ttk.Label(dwell_row,text="Ask about a window after it stays in front (seconds)").pack(side="left")
-        ttk.Spinbox(dwell_row,from_=5,to=600,textvariable=window_dwell,width=6).pack(side="left",padx=8)
-        repeat_row=ttk.Frame(frame); repeat_row.pack(fill="x",pady=2)
-        ttk.Label(repeat_row,text="Repeat same window after (minutes; 0 = off; gap grows if unanswered)").pack(side="left")
-        ttk.Spinbox(repeat_row,from_=0,to=1440,textvariable=same_title_repeat,width=6).pack(side="left",padx=8)
-        summary_row=ttk.Frame(frame); summary_row.pack(fill="x",pady=2)
-        ttk.Label(summary_row,text="Recap window-related chats every (minutes; 0 = off)").pack(side="left")
-        ttk.Spinbox(summary_row,from_=0,to=1440,textvariable=title_session_summary,width=6).pack(side="left",padx=8)
-        ttk.Label(frame,text="The interval starts with the first collected window chat; a recap waits until the local model is free and no chat is being answered.",wraplength=620).pack(anchor="w",pady=(1,5))
-        ttk.Label(frame,text="Mouse and keyboard activity do not reset the window timer. Repeat gaps grow after unanswered check-ins and return to the selected interval when you reply.",wraplength=620).pack(anchor="w",pady=(1,5))
+        daily_cap = tk.StringVar(value=str(max(0,min(5,int(self.settings.get("initiative_daily_cap",3))))) )
+        cap_row=ttk.Frame(frame); cap_row.pack(fill="x",pady=3)
+        ttk.Label(cap_row,text="Daily initiative nudge cap (0–5)").pack(side="left")
+        ttk.Spinbox(cap_row,from_=0,to=5,textvariable=daily_cap,width=5).pack(side="left",padx=8)
         trigger_vars={}
         for trigger,label in (("open_loop_due","Deadline nudges"),("usual_study_start","Usual study-time nudges"),("session_return","Session-return check-ins"),("wind_down","Wind-down notes"),("title_clue","Window-title check-ins")):
             trigger_vars[trigger]=tk.BooleanVar(value=str(self.personal_companion.setting("trigger_enabled_"+trigger,"1")).lower() not in ("0","false","off","no"))
@@ -1663,7 +1431,7 @@ class StudyBuddyApp:
 
         ttk.Separator(frame).pack(fill="x", pady=8)
         ttk.Label(frame, text="Camera privacy and access", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(frame, text="Camera starts only after explicit consent. Frames stay local; only text summaries of facial movement may be sent to your local chat model. No images/video are saved or sent to the model.", wraplength=620).pack(anchor="w", pady=(2, 5))
+        ttk.Label(frame, text="Camera starts only after explicit consent. Frames stay local; only text summaries of facial movement may be sent to your local Llama model. No images/video are saved or sent to the model.", wraplength=620).pack(anchor="w", pady=(2, 5))
         webcam_enabled = tk.BooleanVar(value=bool(self.settings.get("webcam_enabled", False)))
         ttk.Checkbutton(frame, text="Allow camera requests from chat (still requires consent each time)", variable=webcam_enabled).pack(anchor="w", pady=2)
         camera_cooldown = tk.StringVar(value=str(self.settings.get("camera_min_interval_minutes", 5)))
@@ -1745,13 +1513,6 @@ class StudyBuddyApp:
                     raise ValueError
             except ValueError:
                 messagebox.showerror("Settings", "Choose a listed camera cooldown and refresh interval.", parent=win); return
-            try:
-                chat_quiet_value=max(15,min(3600,int(chat_quiet_period.get())))
-                window_dwell_value = max(5, min(600, int(window_dwell.get())))
-                same_title_repeat_value = max(0, min(1440, int(same_title_repeat.get())))
-                title_session_summary_value = max(0, min(1440, int(title_session_summary.get())))
-            except ValueError:
-                messagebox.showerror("Settings", "Timing values must be whole numbers (chat wait 15–3600 seconds, dwell 5–600 seconds, repeat and recap 0–1440 minutes).", parent=win); return
             old_proactive_enabled = bool(self.settings.get("proactive_enabled", True))
             old_facts_tier = str(self.personal_companion.setting("tier_facts", "1")).lower() not in ("0", "false", "off", "no")
             if old_facts_tier != bool(facts_tier.get()):
@@ -1766,13 +1527,21 @@ class StudyBuddyApp:
                 if old != bool(enabled_var.get()):
                     self.personal_companion.set_setting("trigger_enabled_"+trigger,"1" if enabled_var.get() else "0")
                     self.personal_companion.add_consent_ledger("initiative:"+trigger,bool(enabled_var.get()),"trigger_toggle")
-            self.settings.update(model_chat=model.get().strip() or "qwen2.5:1.5b", voice_enabled=voice.get(),
+            timing_values = {}
+            try:
+                for _key, (_var, _low, _high) in timing_vars.items():
+                    _number = int(float(_var.get()))
+                    if not _low <= _number <= _high: raise ValueError
+                    timing_values[_key] = _number
+            except ValueError:
+                messagebox.showerror("Settings", "Window check-in timings must be whole numbers inside the allowed ranges.", parent=win); return
+            self.settings.update(timing_values, window_checkin_llm_text=bool(llm_text.get()))
+            try: cap_value=max(0,min(5,int(daily_cap.get())))
+            except ValueError:
+                messagebox.showerror("Settings","Daily nudge cap must be a number from 0 to 5.",parent=win); return
+            self.settings.update(initiative_daily_cap=cap_value)
+            self.settings.update(model_chat=model.get().strip() or "llama3.2:3b", voice_enabled=voice.get(),
                                  webcam_enabled=webcam_enabled.get(),
-                                 proactive_app_seconds=window_dwell_value,
-                                 proactive_switch_stability_seconds=window_dwell_value,
-                                 proactive_min_user_quiet_seconds=chat_quiet_value,
-                                 proactive_same_title_repeat_minutes=same_title_repeat_value,
-                                 proactive_title_summary_minutes=title_session_summary_value,
                                  camera_min_interval_minutes=camera_cooldown_value,
                                  camera_frame_interval_ms=camera_rate_value,
                                  model_keep_alive_mode=keep_alive_mode.get(),
@@ -2013,7 +1782,7 @@ class StudyBuddyApp:
                 if visual:
                     self._append("Buddy", "The camera preview is active. I don't send or interpret the raw image; the app classifies a face crop locally with an offline FER+ CNN. " + self._summarize_visual_observations(visual), "buddy")
                 elif self.expression_analyzer and not self.expression_analyzer.available:
-                    self._append("Buddy", "The camera preview is active, but local facial-feature analysis isn't available. No camera image is sent to the chat model.", "buddy")
+                    self._append("Buddy", "The camera preview is active, but local facial-feature analysis isn't available. No camera image is sent to Llama.", "buddy")
                 else:
                     self._append("Buddy", "The camera preview is active, but I don't have a fresh facial-feature sample yet. Give it a moment and ask again.", "buddy")
             else:
@@ -2021,7 +1790,7 @@ class StudyBuddyApp:
                 if visual:
                     self._append("Buddy", self._summarize_visual_observations(visual) + " I can't reliably infer your mood from these cues alone—how are you feeling?", "buddy")
                 elif self.expression_analyzer and not self.expression_analyzer.available:
-                    self._append("Buddy", "The camera is active, but facial-feature analysis isn't available. I can't describe your expression from the camera image because the image isn't sent to the chat model.", "buddy")
+                    self._append("Buddy", "The camera is active, but facial-feature analysis isn't available. I can't describe your expression from the camera image because the image isn't sent to Llama.", "buddy")
                 else:
                     self._append("Buddy", "The camera is active, but I don't have a fresh facial-feature sample yet. Give it a moment and ask again.", "buddy")
             return True
@@ -2623,7 +2392,7 @@ class StudyBuddyApp:
             r"(?i)\b(?:help|explain|solve|show|write|review|plan|search|find|tell me|can you|could you|please)\b",
             str(text or "")))
         busy_reply = bool(
-            pending_kind in ("title_availability", "general_availability", "title_session_recap")
+            pending_kind in ("title_availability", "general_availability")
             and ((builder and builder._busy(text)) or boundary == "busy")
             and not busy_with_request
         )
@@ -2669,163 +2438,40 @@ class StudyBuddyApp:
         else:
             self._status("Proactive check-ins are active.")
 
-    def _title_context_for_pending_chat(self):
-        """Return the live title context associated with this user turn, if any."""
-        now = time.time()
-        core = getattr(self, "core", None)
-        if getattr(core, "pending_proactive_kind", None) == "title_session_recap":
+    def _num_setting(self, key, default, low, high):
+        """Read a numeric setting safely, clamped to [low, high]."""
+        try: value = float(self.settings.get(key, default))
+        except (TypeError, ValueError): value = float(default)
+        return max(low, min(high, value))
+
+    def _window_checkin_mode(self, signature, eligible, now):
+        """Decide whether a window check-in is due: 'new', 'still_here', 'returned' or None.
+
+        new        - first time this window context is seen, after window_checkin_new_seconds
+        still_here - same window kept open; repeats every window_checkin_same_minutes
+        returned   - the user left and came back; due window_checkin_return_minutes after the last check-in
+        All of them respect window_checkin_min_gap_seconds between any two window check-ins.
+        """
+        track = self._window_track.get(signature)
+        previous_seen = None
+        if track:
+            previous_seen = float(track.get("seen_ts", now))
+            track["seen_ts"] = now
+            if now - previous_seen > 60:      # not in this window for a while -> it is a return
+                track["returned"] = True
+        if not eligible:
             return None
-        pending_title = str(getattr(core, "pending_proactive_window_title", "") or "").strip()
-        pending_observed = float(getattr(core, "pending_proactive_observed_at", 0) or 0)
-        if (getattr(core, "pending_proactive_kind", None) == "title_availability"
-                and pending_title and pending_observed and now - pending_observed <= 300):
-            return {
-                "app_name": str(getattr(core, "pending_proactive_app_name", None) or "unknown")[:80],
-                "app_category": str(getattr(core, "pending_proactive_app_category", None) or "Other")[:40],
-                "window_title": pending_title[:240],
-                "checkin": str(getattr(core, "pending_proactive_context", None) or "")[:400],
-            }
-        recent = getattr(core, "_recent_proactive_window", None)
-        if (isinstance(recent, dict)
-                and now < float(getattr(core, "_recent_proactive_window_expires_at", 0) or 0)
-                and int(getattr(core, "_recent_proactive_window_turns_left", 0) or 0) > 0):
-            context = {key: str(recent.get(key) or "")[:limit] for key, limit in (
-                ("app_name", 80), ("app_category", 40), ("window_title", 240), ("checkin", 400))}
-            if not context.get("checkin"):
-                signature = self._title_signature_for_context(context)
-                context["checkin"] = str(self._title_context_last_message.get(signature, ""))[:400]
-            return context
-        return None
-
-    def _title_signature_for_context(self, context):
-        if not isinstance(context, dict):
+        if now - float(self._last_window_nudge_ts or 0) < self._num_setting("window_checkin_min_gap_seconds", 90, 0, 3600):
             return None
-        return self._title_context_signature(
-            context.get("app_name"), context.get("app_category"), context.get("window_title"))
-
-    def _record_title_context_checkin(self, signature, message, now=None):
-        """Update per-title visit state when a check-in is actually shown."""
-        if not signature:
-            return
-        now = time.time() if now is None else float(now)
-        previous = float(self._title_context_last_shown.get(signature, 0.0))
-        last_reply = float(self._title_context_last_user_reply.get(signature, 0.0))
-        unanswered = int(self._title_context_unanswered_repeats.get(signature, 0) or 0)
-        if previous:
-            unanswered = unanswered + 1 if last_reply < previous else 0
-        else:
-            unanswered = 0
-        self._title_context_unanswered_repeats[signature] = unanswered
-        self._title_context_checkin_count[signature] = int(
-            self._title_context_checkin_count.get(signature, 0) or 0) + 1
-        self._title_context_last_shown[signature] = now
-        self._title_context_last_message[signature] = str(message or "")[:400]
-
-    def _title_checkin_repeats_last(self, signature, message):
-        """Detect a near-duplicate same-title check-in without another model call."""
-        previous = str(self._title_context_last_message.get(signature, "") or "")
-        current = str(message or "")
-        if not previous.strip() or not current.strip():
-            return False
-
-        stop = {"the", "and", "for", "you", "your", "are", "was", "were", "this", "that",
-                "with", "from", "about", "what", "when", "where", "which", "have", "has",
-                "hey", "there", "just", "still", "into", "out", "its", "it", "i", "me", "my"}
-
-        def tokens(value):
-            return {word for word in re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE)
-                    if len(word) > 2 and word not in stop}
-
-        old_tokens, new_tokens = tokens(previous), tokens(current)
-        if not old_tokens or not new_tokens:
-            return " ".join(previous.casefold().split()) == " ".join(current.casefold().split())
-        body_overlap = len(old_tokens & new_tokens) / min(len(old_tokens), len(new_tokens))
-        old_questions = re.findall(r"[^?]*\?", previous)
-        new_questions = re.findall(r"[^?]*\?", current)
-        old_question = old_questions[-1] if old_questions else ""
-        new_question = new_questions[-1] if new_questions else ""
-        old_q_tokens, new_q_tokens = tokens(old_question), tokens(new_question)
-        question_overlap = (
-            len(old_q_tokens & new_q_tokens) / min(len(old_q_tokens), len(new_q_tokens))
-            if old_q_tokens and new_q_tokens else 0.0
-        )
-        if not old_q_tokens or not new_q_tokens:
-            return body_overlap >= 0.88
-        return body_overlap >= 0.68 and question_overlap >= 0.55
-
-    def _suppress_repeated_title_checkin(self, signature):
-        self._title_context_last_attempt[signature] = time.time()
-        previous = float(self._title_context_last_shown.get(signature, 0.0))
-        last_reply = float(self._title_context_last_user_reply.get(signature, 0.0))
-        if previous and last_reply < previous:
-            self._title_context_unanswered_repeats[signature] = min(
-                3, int(self._title_context_unanswered_repeats.get(signature, 0) or 0) + 1)
-        self._status("Repeated same-title check-in suppressed; the prior one stays in context.")
-
-    def _remember_title_context_exchange(self, signature, user_text, buddy_text, context=None):
-        """Keep bounded, session-only title dialogue for repeat check-ins and recaps."""
-        if not signature:
-            return
-        now = time.time()
-        user_text = str(user_text or "").strip()
-        if user_text:
-            self._title_context_last_user_reply[signature] = now
-            self._title_context_unanswered_repeats[signature] = 0
-            exchange = self._title_context_recent_exchange.setdefault(signature, [])
-            exchange.append({
-                "user": user_text[:240],
-                "buddy": str(buddy_text or "").strip()[:320],
-                "at": now,
-            })
-            try:
-                context_turns = max(0, int(self.core.settings.get("recent_turns", 4)))
-            except (AttributeError, TypeError, ValueError):
-                context_turns = 4
-            if context_turns:
-                del exchange[:-context_turns]
-            else:
-                exchange.clear()
-        if (isinstance(context, dict) and str(context.get("window_title") or "").strip()
-                and not context.get("private_context")
-                and context.get("app_category") not in ("Private", "Meeting")):
-            checkin = str(context.get("checkin") or "")[:400]
-            if user_text:
-                if checkin and any(item.get("signature") == signature and item.get("checkin") == checkin
-                                   for item in reversed(self._title_session_events)):
-                    checkin = ""
-                self._title_session_events.append({
-                    "signature": signature,
-                    "at": now,
-                    "app_name": str(context.get("app_name") or "unknown")[:80],
-                    "app_category": str(context.get("app_category") or "Other")[:40],
-                    "window_title": str(context.get("window_title") or "").strip()[:240],
-                    "checkin": checkin,
-                    "user": user_text[:180],
-                    "buddy": str(buddy_text or "").strip()[:240],
-                })
-                del self._title_session_events[:-200]
-            elif checkin and not any(
-                    item.get("signature") == signature and item.get("checkin") == checkin
-                    for item in reversed(self._title_session_events)):
-                self._title_session_events.append({
-                    "signature": signature,
-                    "at": now,
-                    "app_name": str(context.get("app_name") or "unknown")[:80],
-                    "app_category": str(context.get("app_category") or "Other")[:40],
-                    "window_title": str(context.get("window_title") or "").strip()[:240],
-                    "checkin": checkin,
-                    "user": "",
-                    "buddy": "",
-                })
-                del self._title_session_events[:-200]
-        # Keep this temporary, in-memory cache bounded during long desktop sessions.
-        if len(self._title_context_recent_exchange) > 30:
-            oldest = min(
-                self._title_context_recent_exchange,
-                key=lambda key: max((float(item.get("at", 0)) for item in self._title_context_recent_exchange[key]), default=0),
-            )
-            if oldest != signature:
-                self._title_context_recent_exchange.pop(oldest, None)
+        if track is None:
+            return "new"
+        since_last = now - float(track.get("last_ts", 0))
+        if track.get("returned"):
+            return "returned" if since_last >= self._num_setting("window_checkin_return_minutes", 5, 1, 240) * 60 else None
+        limit = int(self._num_setting("window_checkin_max_followups", 0, 0, 100))
+        if limit and int(track.get("followups", 0)) >= limit:
+            return None
+        return "still_here" if since_last >= self._num_setting("window_checkin_same_minutes", 10, 1, 240) * 60 else None
 
     def _window_limiter_key(self, app_name, category, title=""):
         """Rate-limit a title context without saving the raw title in limiter state."""
@@ -2836,17 +2482,14 @@ class StudyBuddyApp:
         return key, str(category or "Other")
 
     def _title_context_signature(self, app_name, category, title=""):
-        """Digest the underlying topic so badges/counters do not create fake new tabs."""
+        """Digest a stable topic identity so changing browser suffixes do not re-prompt."""
         normalized = " ".join(str(title or "").casefold().split())
-        # Browsers and video sites may prepend changing tab/view counters.
-        normalized = re.sub(
-            r"^\s*(?:\(\s*\d{1,8}\s*\)|\[\s*\d{1,8}\s*\])[\s.:|—–-]*", "", normalized)
         # Browser/media providers and years often change around an otherwise
         # identical title as a tab or playback state updates.
         normalized = re.sub(
             r"\s*(?:[-–—|•·]\s*)(?:youtube|netflix|spotify|twitch|vimeo|disney\+|prime video|"
-            r"google chrome|chrome|microsoft edge|edge|firefox|brave|yandex browser|yandex|opera|safari)\b.*$",
-            "", normalized, flags=re.I)
+            r"google chrome|chrome|microsoft edge|edge|firefox|brave)\b.*$", "", normalized, flags=re.I)
+        normalized = re.sub(r"\b(?:19|20)\d{2}\b", " ", normalized)
         normalized = re.sub(
             r"\b(?:official\s+)?(?:trailer|teaser|preview|clip|full\s+movie|movie\s+clip)\b.*$",
             " ", normalized, flags=re.I)
@@ -2864,7 +2507,8 @@ class StudyBuddyApp:
             return True
         if (not self.settings.get("proactive_enabled", True)
                 or not self.awareness_enabled or not self.settings.get("awareness_enabled", True)
-                or self.closing or not self._proactive_chat_is_quiet()
+                or self.closing or self.busy or self._proactive_cancel_event.is_set()
+                or time.time() - float(self._last_entry_activity_ts or 0) < 10
                 or self.proactive_pause_flow.is_paused(time.time())
                 or self._is_quiet(datetime.datetime.now().strftime("%H:%M"))):
             return False
@@ -2874,41 +2518,15 @@ class StudyBuddyApp:
             safe = current.safe_summary()
         except Exception:
             return False
-        if safe.get("private_context") or safe.get("app_category") in ("Private", "Meeting"):
+        if (safe.get("private_context") or safe.get("app_category") in ("Private", "Meeting")
+                or float(safe.get("idle_seconds", 0)) >= 900):
             return False
         expected_title = " ".join(str(meta.get("window_title") or "").split()).casefold()
         current_title = " ".join(str(safe.get("window_title") or "").split()).casefold()
         expected_app = str(meta.get("app_name") or "").strip().casefold()
         current_app = str(safe.get("app_name") or "").strip().casefold()
-        expected_signature = self._title_context_signature(
-            expected_app, meta.get("app_category"), expected_title)
-        current_signature = self._title_context_signature(
-            current_app, safe.get("app_category"), current_title)
-        return bool(expected_title and expected_app and expected_app == current_app
-                    and expected_signature == current_signature)
-
-    def _proactive_chat_is_quiet(self, now=None):
-        """Run normally before the first chat; pause for the configured gap afterward."""
-        now=time.time() if now is None else float(now)
-        if not self.busy and not self._has_user_chatted_this_session:
-            return bool(now-float(self._last_entry_activity_ts or 0) >= 10)
-        try:
-            quiet_seconds=max(15,min(3600,int(self.settings.get("proactive_min_user_quiet_seconds",180))))
-        except (TypeError,ValueError):
-            quiet_seconds=180
-        last_activity=max(float(self.last_interaction_ts or 0),
-                          float(self.last_turn_completed_ts or 0),
-                          float(self._last_entry_activity_ts or 0))
-        return bool(not self.busy and now-last_activity >= quiet_seconds)
-
-    def _release_title_checkin_attempt(self, decision):
-        """Let a title check-in retry later if chat activity won the delivery race."""
-        if not decision or getattr(decision,"trigger",None)!="title_clue":
-            return
-        meta=dict(getattr(decision,"meta",{}) or {})
-        signature=self._title_context_signature(meta.get("app_name"),meta.get("app_category"),meta.get("window_title",""))
-        self._seen_title_contexts.discard(signature)
-        self._title_context_last_attempt.pop(signature,None)
+        return bool(expected_title and expected_title == current_title
+                    and expected_app and expected_app == current_app)
 
     def _scheduler_tick(self):
         if self.closing: return
@@ -2999,7 +2617,6 @@ class StudyBuddyApp:
         # above remain unchanged and are not counted as initiative nudges.
         policy = getattr(self.core, "initiative_policy", None)
         if policy and self.settings.get("proactive_enabled", True):
-            decision = None
             try:
                 if self.awareness_enabled:
                     snapshot = self.context_engine.observe(self._idle_seconds())
@@ -3016,15 +2633,10 @@ class StudyBuddyApp:
                 quiet = self._is_quiet(local_now.strftime("%H:%M")) if quiet_configured else False
                 paused_until = float(self.proactive_pause_flow.paused_until)
                 if snapshot:
-                    signature=self._title_context_signature(
-                        safe.get("app_name","unknown"), safe.get("app_category","Other"), safe.get("window_title",""))
+                    signature=(safe.get("app_name","unknown"),safe.get("app_category","Other"),safe.get("window_title",""))
                     if signature != self.last_context_signature:
                         self.last_context_signature=signature
                         self.last_context_since=now
-                        # A new foreground visit gets its own dwell and check-in.
-                        # The configurable global cooldown still limits rapid prompts.
-                        self._seen_title_contexts.clear()
-                        self._delivered_title_contexts.clear()
                     stable_for=now-float(self.last_context_since or now)
                 else:
                     stable_for=0.0
@@ -3034,28 +2646,6 @@ class StudyBuddyApp:
                 usable_title = str(safe.get("window_title") or "").strip()
                 window_context_signature = self._title_context_signature(
                     safe.get("app_name"), category, usable_title)
-                window_dwell_seconds = max(5, min(600, int(self.settings.get(
-                    "proactive_app_seconds", self.settings.get("proactive_switch_stability_seconds", 25)))))
-                same_title_repeat_minutes = max(0, min(1440, int(self.settings.get("proactive_same_title_repeat_minutes", 5))))
-                last_same_title_checkin = float(self._title_context_last_shown.get(window_context_signature, 0.0))
-                last_same_title_attempt = float(self._title_context_last_attempt.get(window_context_signature, 0.0))
-                last_chat_activity = max(float(self.last_interaction_ts or 0),
-                                         float(self.last_turn_completed_ts or 0),
-                                         float(self._last_entry_activity_ts or 0))
-                user_quiet = self._proactive_chat_is_quiet(now)
-                repeat_anchor = max(last_same_title_checkin, last_chat_activity,
-                                    float(self._title_session_recap_last_shown_at or 0))
-                unanswered_repeats = int(self._title_context_unanswered_repeats.get(
-                    window_context_signature, 0) or 0)
-                repeat_multiplier = min(4, 2 ** min(2, max(0, unanswered_repeats)))
-                repeat_wait_minutes = min(1440, same_title_repeat_minutes * repeat_multiplier)
-                same_title_repeat_due = bool(same_title_repeat_minutes and last_same_title_checkin
-                    and now-repeat_anchor >= repeat_wait_minutes*60
-                    and not self._title_session_recap_due(now))
-                same_title_repeat_ready = bool(not last_same_title_checkin or not same_title_repeat_minutes
-                    or same_title_repeat_due)
-                same_title_retry_ready = bool(not same_title_repeat_due or not last_same_title_attempt
-                    or now-last_same_title_attempt >= repeat_wait_minutes*60)
                 router = getattr(self.core, "intent_router", None)
                 builder = self.core.relationship_builder
                 relationship_deferred = bool(builder and builder.deferred_this_session)
@@ -3065,11 +2655,11 @@ class StudyBuddyApp:
                     # independent, title-grounded curiosity about a new window.
                     # Explicit proactive pauses are enforced separately below.
                     and not own_window
-                    and user_quiet
-                    and stable_for >= window_dwell_seconds
-                    and same_title_repeat_ready
-                    and same_title_retry_ready
-                    and (window_context_signature not in self._seen_title_contexts or same_title_repeat_due))
+                    and ContextEngine.has_specific_title_clue(safe)
+                    and stable_for >= self._num_setting("window_checkin_new_seconds",
+                                                        self.settings.get("proactive_switch_stability_seconds", 15), 5, 3600))
+                window_mode = self._window_checkin_mode(window_context_signature, title_clue, now) if snapshot else None
+                title_clue = window_mode is not None
                 title_can_replace_idle_invite = bool(
                     title_clue and builder and builder.phase in ("availability", "topic_permission", "conversation"))
                 relationship_dialog_pending = bool(
@@ -3079,8 +2669,8 @@ class StudyBuddyApp:
                 wind_down = bool(self.settings.get("late_night_nudge_enabled", False) and local_now.strftime("%H:%M") == late_time and self._phase2_wind_down_day != local_now.date().isoformat())
                 router = getattr(self.core, "intent_router", None)
                 self.proactive_limiter.refresh_day()
-                cap_setting=0
-                self.proactive_limiter.daily_limit=0
+                cap_setting=max(0,min(5,int(self.settings.get("initiative_daily_cap", self.core.companion_config.get("daily_cap_default", 3)))))
+                self.proactive_limiter.daily_limit=cap_setting
                 # Offer opt-in rhythm learning after activity on at least three distinct days.
                 router = getattr(self.core, "intent_router", None)
                 rhythm_enabled = str(self.personal_companion.setting("tier_rhythm", "0")).lower() not in ("0","false","off","no")
@@ -3105,8 +2695,7 @@ class StudyBuddyApp:
                     "limiter_last_sent_ts": float(self.proactive_limiter.state.get("last_sent_at",0)),
                     "proactive_enabled": bool(self.settings.get("proactive_enabled", True)),
                     "active": bool(not self.awareness_enabled or (snapshot and snapshot.idle_seconds < 900)),
-                    "busy": bool(self.busy or self._phase2_nudge_queued or self._phase2_rhythm_offer_queued), "worker_busy": bool(self.proactive_worker_running or self._memory_review_running),
-                    "user_quiet": user_quiet,
+                    "busy": bool(self.busy or self._phase2_nudge_queued or self._phase2_rhythm_offer_queued), "worker_busy": bool(self.proactive_worker_running),
                     "dialog_pending": bool(router and router.has_pending or relationship_dialog_pending
                                             or self.proactive_pause_flow.awaiting_duration),
                     "typing": bool(now-float(self._last_entry_activity_ts or 0)<10),
@@ -3114,9 +2703,8 @@ class StudyBuddyApp:
                     "last_interaction_ts": max(self.last_interaction_ts, self.last_turn_completed_ts),
                     "idle_seconds": float(snapshot.idle_seconds if snapshot else 0),
                     "last_nudge_ts": max(float(self.personal_companion.setting("initiative_last_nudge_ts", "0") or 0), float(self.proactive_limiter.state.get("last_sent_at",0))),
-                    "daily_cap": 0,
+                    "daily_cap": int(self.settings.get("initiative_daily_cap", self.core.companion_config.get("daily_cap_default", 3))),
                     "session_return": session_return, "wind_down": wind_down,
-                    "same_title_repeat_due": same_title_repeat_due,
                     "title_clue_enabled": bool(self.awareness_enabled and title_clue),
                 }
                 ctx = {"app_category": category, "app_name": safe.get("app_name", "unknown"),
@@ -3124,7 +2712,7 @@ class StudyBuddyApp:
                        "private": bool(safe.get("private_context")), "meeting": category == "Meeting",
                        "relationship_deferred": relationship_deferred,
                        "own_window": own_window, "has_window_context": title_clue,
-                       "quiet": quiet, "quiet_explicit": quiet_configured}
+                       "has_specific_title_clue": title_clue, "quiet": quiet, "quiet_explicit": quiet_configured}
                 decision = policy.evaluate(now=now, ctx=ctx, state=state)
                 # Retention is a single cheap delete once per local day.
                 today = local_now.date().isoformat()
@@ -3132,44 +2720,36 @@ class StudyBuddyApp:
                     self.core.feedback_logger.prune(now)
                     self._phase2_retention_day = today
                 if decision:
-                    if decision.trigger == "title_clue":
-                        # Every stable title gets the same isolated, asynchronous
-                        # model path; keep interactive chat responsive while it runs.
-                        if (window_context_signature not in self._seen_title_contexts
-                                or same_title_repeat_due):
+                    if decision.needs_llm:
+                        # Title check-ins are event-triggered: once per distinct
+                        # stable app/title context in this app session.
+                        if decision.trigger == "title_clue" and window_mode:
+                            track = self._window_track.setdefault(window_context_signature,
+                                {"first_ts": now, "last_ts": now, "seen_ts": now, "count": 0, "followups": 0})
+                            minutes_since = int(max(0, now - float(track.get("last_ts", now))) // 60)
+                            track["count"] = int(track.get("count", 0)) + 1
+                            if window_mode == "still_here":
+                                track["followups"] = int(track.get("followups", 0)) + 1
+                            track["last_ts"] = now
+                            track["returned"] = False
+                            self._last_window_nudge_ts = now
                             self._seen_title_contexts.add(window_context_signature)
-                            self._title_context_last_attempt[window_context_signature] = now
+                            mode_info = {"mode": window_mode, "minutes_here": int(stable_for // 60),
+                                         "minutes_since_last": minutes_since, "checkin_count": track["count"],
+                                         "free_text": bool(self.settings.get("window_checkin_llm_text", True))}
+                            decision.meta["window_mode"] = window_mode
                             self.last_nudge = now
                             self._proactive_cancel_event.clear()
                             self.proactive_worker_running = True
-                            self._status("Thinking about the current window title quietly…")
-                            model_context = dict(safe)
-                            previous_checkin_count = int(
-                                self._title_context_checkin_count.get(window_context_signature, 0) or 0)
-                            model_context["checkin_number"] = previous_checkin_count + 1
-                            model_context["repeat_checkin"] = previous_checkin_count > 0
-                            previous_checkin = self._title_context_last_message.get(window_context_signature)
-                            if previous_checkin:
-                                model_context["previous_checkin"] = previous_checkin
-                                model_context["previous_checkin_at"] = last_same_title_checkin
-                                model_context["minutes_since_previous_checkin"] = max(
-                                    0, int((now - last_same_title_checkin) / 60))
-                            if model_context["repeat_checkin"]:
-                                recent_exchange = self._title_context_recent_exchange.get(window_context_signature, [])
-                                if recent_exchange:
-                                    context_turns = max(0, int(self.core.settings.get("recent_turns", 4)))
-                                    model_context["recent_related_exchange"] = [
-                                        {"user": item.get("user", ""), "buddy": item.get("buddy", ""),
-                                         "at": item.get("at", 0)}
-                                        for item in (recent_exchange[-context_turns:] if context_turns else [])
-                                    ]
-                            context = ("PROACTIVE DESKTOP CONTEXT (limited, local signal only): "
-                                + json.dumps(model_context, ensure_ascii=False))
+                            self._status("Checking the current window title quietly…")
+                            context = ("PROACTIVE WINDOW MODE: " + json.dumps(mode_info, ensure_ascii=True) + ". "
+                                "PROACTIVE DESKTOP CONTEXT (limited, local signal only): "
+                                + json.dumps(safe, ensure_ascii=True)
+                                + ". Use ONLY the current sanitized app name and window title as evidence. "
+                                "Do not retrieve or reuse any old assistant message, prior guess, task, reminder or chat. "
+                                "If the title does not identify a specific topic, skip the check-in.")
                             threading.Thread(target=self._proactive_worker,
                                 args=(context, str(safe.get("app_name") or "unknown"), category, decision), daemon=True).start()
-                    elif decision.needs_llm:
-                        # No other initiative currently uses the LLM path.
-                        pass
                     elif decision.text and not self._phase2_nudge_queued:
                         # Deterministic template: no model call or background thread.
                         self._phase2_nudge_queued=True
@@ -3178,10 +2758,6 @@ class StudyBuddyApp:
                     self._phase2_session_return_consumed = True
                 if wind_down and decision and decision.trigger == "wind_down":
                     self._phase2_wind_down_day = local_now.date().isoformat()
-                self._maybe_start_title_session_recap(
-                    now, category=category, private=bool(safe.get("private_context")),
-                    quiet=quiet, router=router,
-                )
             except Exception as exc:
                 self.events.put(("status", "Initiative policy skipped this tick: " + str(exc)[:120]))
         self.root.after(5000, self._scheduler_tick)
@@ -3252,28 +2828,10 @@ class StudyBuddyApp:
             self.events.put(("memory_review_progress", str(message)))
 
         try:
-            with self.intelligence_monitor.request_trace():
-                review_event_id = self.intelligence_monitor.start(
-                    "memory_review", "My World quiet review", "Background review",
-                    "Recent chat is curated locally; conversation text omitted",
-                )
-                try:
-                    result = self.lifecycle.review_recent_conversation(
-                        self.personal_companion, limit_turns=60,
-                        cancel_event=self._memory_review_cancel_event,
-                        progress_callback=progress)
-                except Exception:
-                    self.intelligence_monitor.finish(
-                        review_event_id, "failed", "Review error details omitted for privacy",
-                    )
-                    raise
-                else:
-                    review_failed = result.get("status") in {"error", "failed"}
-                    self.intelligence_monitor.finish(
-                        review_event_id,
-                        "failed" if review_failed else "success",
-                        "Review returned an error" if review_failed else "",
-                    )
+            result = self.lifecycle.review_recent_conversation(
+                self.personal_companion, limit_turns=60,
+                cancel_event=self._memory_review_cancel_event,
+                progress_callback=progress)
             status = result.get("status", "processed")
             created = int(result.get("created", 0) or 0)
             processed = int(result.get("processed_turns", 0) or 0)
@@ -3334,105 +2892,18 @@ class StudyBuddyApp:
         finally:
             self._memory_review_running = False
 
-    def _title_session_recap_due(self, now):
-        interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
-        if not interval or not self._title_session_events:
-            return False
-        batch_started_at = min(float(item.get("at", 0)) for item in self._title_session_events)
-        return (now >= batch_started_at + interval * 60
-                and now >= float(self._title_session_recap_retry_at or 0))
-
-    def _maybe_start_title_session_recap(self, now, *, category="Other", private=False, quiet=False, router=None):
-        """Queue a recap when its interval expires and local chat/model work is idle."""
-        interval = max(0, min(1440, int(self.settings.get("proactive_title_summary_minutes", 30))))
-        if (not interval or not self._title_session_events or self._title_session_recap_worker_running
-                or self.proactive_worker_running or self._memory_review_running or self.busy
-                or self.camera_active or self.camera_consent_pending
-                or self._phase2_nudge_queued or self._phase2_rhythm_offer_queued or self._consent_event_queued
-                or not self.awareness_enabled or not self.settings.get("awareness_enabled", True)
-                or not self.settings.get("proactive_enabled", True)
-                or self.proactive_pause_flow.is_paused(now) or self.proactive_pause_flow.awaiting_duration
-                or not self._proactive_chat_is_quiet(now)
-                or quiet or private or category in ("Private", "Meeting")
-                or (router and router.has_pending)
-                or (self.core.relationship_builder and self.core.relationship_builder.phase)):
-            return False
-        if not self._title_session_recap_due(now):
-            return False
-        batch = list(self._title_session_events[:12])
-        if not batch:
-            return False
-        self._title_session_recap_batch_id += 1
-        batch_id = self._title_session_recap_batch_id
-        self._title_session_recap_active_id = batch_id
-        self._title_session_recap_worker_running = True
-        self._title_session_recap_attempt_at = now
-        self._proactive_cancel_event.clear()
-        self.proactive_worker_running = True
-        self._status("Preparing a short recap of your recent window chats quietly…")
-        threading.Thread(
-            target=self._title_session_recap_worker,
-            args=(batch, batch_id), daemon=True,
-        ).start()
-        return True
-
-    def _title_session_recap_worker(self, entries, batch_id):
-        text = ""
-        try:
-            with self.intelligence_monitor.request_trace():
-                self.intelligence_monitor.mark_flow_node("desktop")
-                event_id = self.intelligence_monitor.start(
-                    "proactive_request", "Window-chat session recap", "Proactive agent",
-                    "Bounded session evidence; generated text omitted",
-                )
-                try:
-                    text = self.core.generate_title_session_recap(
-                        entries, cancel_event=self._proactive_cancel_event)
-                except Exception:
-                    self.intelligence_monitor.finish(
-                        event_id, "failed", "Session recap generation details omitted for privacy",
-                    )
-                    raise
-                else:
-                    self.intelligence_monitor.finish(event_id, "success")
-            if self._proactive_cancel_event.is_set():
-                self.events.put(("title_session_recap_skipped", batch_id, "User chat took priority."))
-            elif text:
-                self.events.put(("title_session_recap_reply", text, batch_id, len(entries)))
-            else:
-                self.events.put(("title_session_recap_skipped", batch_id, "No useful recap could be made."))
-        except Exception:
-            self.events.put(("title_session_recap_skipped", batch_id, "The local model could not make a recap."))
-
     def _proactive_worker(self, context, app_name="unknown", category="Other", decision=None):
         try:
-            with self.intelligence_monitor.request_trace():
-                self.intelligence_monitor.mark_flow_node("desktop")
-                event_id = self.intelligence_monitor.start(
-                    "proactive_request", "Title check-in generation", "Proactive agent",
-                    "Fresh sanitized app/title context; generated text omitted",
-                )
-                try:
-                    text = self.core.generate_proactive_message(context, cancel_event=self._proactive_cancel_event)
-                except Exception:
-                    self.intelligence_monitor.finish(
-                        event_id, "failed", "Proactive generation error details omitted for privacy",
-                    )
-                    raise
-                else:
-                    self.intelligence_monitor.finish(event_id, "success")
+            text = self.core.generate_proactive_message(context, cancel_event=self._proactive_cancel_event)
             if self._proactive_cancel_event.is_set():
-                self.events.put(("proactive_skipped", "User chat took priority.", decision))
+                self.events.put(("proactive_skipped", "User chat took priority."))
             elif text and text.strip():
                 self.events.put(("proactive_reply", text, app_name, category, decision))
             else:
-                self.events.put(("proactive_skipped", "The local model did not produce a suitable check-in for this window."))
+                self.events.put(("proactive_skipped", "The local model couldn't make a grounded activity guess from this window."))
         except Exception as exc:
             # Background failures must never reset or interrupt an active chat.
-            if self._proactive_cancel_event.is_set():
-                self.events.put(("proactive_skipped", "User chat took priority.", decision))
-            else:
-                self.events.put(("proactive_skipped", "The local model could not write a window check-in."))
+            self.events.put(("proactive_skipped", "Proactive guess skipped because local generation failed: " + str(exc)[:140]))
 
     def _desktop_context_for_chat(self):
         """Return current foreground metadata, or a clearly labelled recent external title.
@@ -3450,11 +2921,11 @@ class StudyBuddyApp:
             if self.context_engine.is_studybuddy_window(current):
                 recent_external = self.context_engine.last_external_summary(max_age_seconds=600)
                 if recent_external:
-                    return json.dumps(recent_external, ensure_ascii=False, separators=(",", ":"))
+                    return json.dumps(recent_external, ensure_ascii=True, separators=(",", ":"))
             summary = current.safe_summary()
             summary["observation_source"] = "current_foreground"
             summary["age_seconds"] = 0
-            return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+            return json.dumps(summary, ensure_ascii=True, separators=(",", ":"))
         except Exception:
             return "Desktop Awareness is enabled, but the current foreground-app snapshot is unavailable."
 
@@ -3486,43 +2957,28 @@ class StudyBuddyApp:
         except Exception:return False
 
     def _apply_autostart(self, enabled):
-        """Run the Ollama repair batch, then the normal app launcher at sign-in."""
+        """Create/remove per-user Startup entries for the GUI and background agent."""
         if os.name != "nt":
             return
         try:
-            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            if not os.path.exists(pythonw):
-                pythonw = sys.executable
             startup = os.path.join(os.environ.get("APPDATA", ""),
                 "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
             if not startup: return
             os.makedirs(startup, exist_ok=True)
-            buddy_entry = os.path.join(startup, "StudyBuddy.cmd")
-            legacy_vbs_entry = os.path.join(startup, "StudyBuddy.vbs")
-            if enabled:
-                fix_batch = os.path.join(ROOT, "fix_chat_model.bat")
-                run_batch = os.path.join(ROOT, "run_study_buddy.bat")
-                content = ('@echo off\r\n'
-                           'cd /d "' + ROOT + '"\r\n'
-                           'call "' + fix_batch + '" /startup /quiet\r\n'
-                           'call "' + run_batch + '"\r\n')
-                with open(buddy_entry, "w", encoding="utf-8") as f:
-                    f.write(content)
-            elif os.path.exists(buddy_entry):
-                os.remove(buddy_entry)
-            # Retire the old blocking VBS launcher without deleting a Startup file.
-            if os.path.exists(legacy_vbs_entry):
-                with open(legacy_vbs_entry, "w", encoding="utf-16") as f:
-                    f.write("' Replaced by StudyBuddy.cmd, which starts the UI promptly.\r\n")
-
-            background_entry = os.path.join(startup, "StudyBuddyBackground.cmd")
-            if self.settings.get("background_agent_enabled", True):
-                background_script = os.path.join(ROOT, "app", "background_agent.py")
-                content = '@echo off\nstart "" "' + pythonw + '" "' + background_script + '"\n'
-                with open(background_entry, "w", encoding="utf-8") as f:
-                    f.write(content)
-            elif os.path.exists(background_entry):
-                os.remove(background_entry)
+            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.exists(pythonw): pythonw = sys.executable
+            entries = {
+                "StudyBuddy.cmd": os.path.join(ROOT, "app", "desktop_app.py"),
+                "StudyBuddyBackground.cmd": os.path.join(ROOT, "app", "background_agent.py"),
+            }
+            for filename, script in entries.items():
+                entry = os.path.join(startup, filename)
+                should_enable = enabled if filename == "StudyBuddy.cmd" else bool(self.settings.get("background_agent_enabled", True))
+                if should_enable:
+                    content = '@echo off\nstart "" "' + pythonw + '" "' + script + '"\n'
+                    with open(entry, "w", encoding="utf-8") as f: f.write(content)
+                elif os.path.exists(entry):
+                    os.remove(entry)
         except Exception as exc:
             if hasattr(self, "events"):
                 self.events.put(("status", "Could not update Windows startup setting: " + str(exc)))
@@ -3594,10 +3050,8 @@ class StudyBuddyApp:
     def show_window(self): self.root.deiconify(); self.root.lift()
     def quit(self):
         self.closing=True
-        if self._active_chat_cancel_event is not None:
-            self._cancel_background_llm_work(self._active_chat_cancel_event)
-        self._cancel_background_llm_work(self._memory_review_cancel_event)
-        self._cancel_background_llm_work(self._proactive_cancel_event)
+        self._memory_review_cancel_event.set()
+        self._proactive_cancel_event.set()
         try: self.personal_companion.set_setting("initiative_last_session_ts",str(time.time()))
         except Exception: pass
         try:

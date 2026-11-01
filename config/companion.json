@@ -17,11 +17,11 @@
   },
   "rejected_cooldown_days": 90,
   "response_modes": {
-    "quick": 20,
-    "chat": 56,
-    "deep": 96
+    "quick": 64,
+    "chat": 110,
+    "deep": 170
   },
-  "prompt_token_limit": 1300,
+  "prompt_token_limit": 1800,
   "initiative_quiet_default": "23:00-07:00",
   "loop_escalation_days": [
     3,
@@ -44,7 +44,7 @@
   "rhythm_half_life_days": 14,
   "rhythm_min_days": 5,
   "rhythm_min_minutes": 30,
-  "daily_cap_default": 0,
+  "daily_cap_default": 5,
   "trigger_cooldown_minutes": {
     "open_loop_due": 0,
     "usual_study_start": 1380,

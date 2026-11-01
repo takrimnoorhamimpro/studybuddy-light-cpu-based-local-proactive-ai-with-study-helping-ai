@@ -254,7 +254,7 @@ class ProactiveRateLimiter:
     """
     def __init__(self, state_path=None, *, global_cooldown_seconds=0,
                  same_app_cooldown_seconds=0, attempt_cooldown_seconds=0,
-                 daily_limit=0, clock=None):
+                 daily_limit=3, clock=None):
         self.state_path = state_path
         self.global_cooldown_seconds = max(0, int(global_cooldown_seconds))
         self.same_app_cooldown_seconds = max(self.global_cooldown_seconds, int(same_app_cooldown_seconds))
@@ -359,7 +359,7 @@ class ProactiveRateLimiter:
         with self._lock:
             now = float(self.clock())
             self._roll_day()
-            if self.daily_limit > 0 and int(self.state.get("daily_attempts", 0)) >= self.daily_limit:
+            if int(self.state.get("daily_attempts", 0)) >= self.daily_limit:
                 return False
             if now - float(self.state.get("last_attempt_at", 0.0)) < self.attempt_cooldown_seconds:
                 return False

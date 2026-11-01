@@ -1,41 +1,5 @@
 # Changelog
 
-## Restore configurable window curiosity — 2026-10-31
-
-- Removed the unwanted quiet-time conversation prompt. Proactive desktop curiosity is again driven by a new foreground window or tab, after its configurable dwell time (25 seconds by default).
-- Added Settings controls for window dwell and the minimum gap between window check-ins. The default gap is 0, so a different tab can prompt independently; deduplication now lasts for one foreground visit rather than the whole app session.
-- Added a configurable same-title repeat interval (5 minutes by default). Every foreground title, including generic app titles, now uses an isolated local LLM prompt; it makes a short topic/activity guess instead of reciting the full caption, and voice reads the generated message.
-- Removed keyword-bound title-guess replies. The temporary window context follows the check-in into the next three turns, where the normal chat model answers the user's actual follow-up. Failed or unsuitable generations are skipped instead of replaced with a fixed guess.
-- Title checks no longer require keyboard or mouse activity. Every eligible stable title goes to the local model; if the window changes during generation, the stale reply is discarded and the title can be checked again on return.
-- If local generation fails or has no useful clue, the check-in is skipped; a title that changes during delivery can be tried again when the user returns.
-- Same-title follow-ups now receive a bounded, session-only summary of the recent user/Buddy exchange so the local model can build on what the user already answered. Repeated question wording is filtered; leading video counters such as `(243)` no longer reset the title identity.
-- Added output checks for long-caption echoing, binary platform questions, JSON-escaped titles, and third-person narration. A normal chat reply gets one local-LLM rewrite only if it repeats a long caption; ordinary chat and proactive generation remain single-pass.
-- Added a configurable interval recap for title-related chat. The interval starts at the first queued title check-in; the batch includes unanswered Buddy check-ins and up to 12 linked exchanges, and waits for current chat/model work to finish without resetting the timer on each message. The local model produces a concise, curious English recap; larger backlogs are handled in later batches. The queue is session-only and defers for pauses, quiet hours, private windows, or meetings; setting the interval to 0 disables it.
-- Recap output now rejects skip markers mixed into prose, third-person references to the user, repeated full captions, and title-only claims about confirmed activity; invalid output is suppressed and retried later.
-
-## Reduce per-turn prompt and generation work — 2026-10-31
-
-- Removed My World gap lists, old summaries, and up to 24 stored turns from the live companion prompt. Ordinary chat now uses recent chat context and only relevant bounded confirmed preferences; the idle curator remains responsible for building My World.
-- Replaced verbose safety, character, camera, and tool-policy paragraphs with compact rules that preserve consent, safety, and grounding behavior.
-- Capped routed schemas at two, reduced the active prompt budget to 700 estimated tokens, kept one recent exchange, and set quick/chat caps to 20/40 while preserving the 96-token deep mode.
-- Removed duplicate session-specific guidance from ordinary chat; recent conversational history and relevant persona retrieval remain in place.
-- Switched the default CPU model to installed `qwen2.5:1.5b` and quick/chat/deep generation caps to 20/40/80, while retaining the 3072-token context for longer memory review.
-- Routed local Ollama requests and startup probes through `127.0.0.1`. A controlled stream request received headers in 0.62 s with that endpoint versus 2.13 s via `localhost`; a warm in-memory `ChatCore.handle_message` run then showed first text in 0.42 s and completed in 1.64 s on this PC.
-- Updated `fix_chat_model.bat` to read the configured chat model and warm it with a one-token, CPU-only local request before launching Study Buddy. The batch was run successfully against the installed Qwen model.
-- Updated camera privacy wording and the architecture model label to follow the selected chat model instead of naming Llama directly.
-- Removed the daily proactive-nudge cap by default. A cap setting of 0 means unlimited; quiet hours, pause controls, per-trigger cooldowns, and title deduplication remain active.
-- Kept the selected model configurable and updated setup/startup defaults to install/check the faster default. Existing model files and user data were not deleted.
-- Removed the now-unused My World area/context assembly helpers from the relationship layer. No test scripts or user database files were edited in this optimization pass.
-
-## Latency and background scheduling — 2026-10-31
-
-- Serialized all calls through the single resident Ollama client and added queue-wait timing so foreground and background model use is visible and does not compete on CPU.
-- Typing or sending a chat message now signals the active idle My World review/title check-in and closes its cancellable stream, freeing the model for user chat. A cancelled review keeps its cursor for the next quiet period.
-- Suppressed background-agent model consolidation while the desktop app is open; reminder delivery continues.
-- Lowered short/normal/deep reply token caps to reduce avoidable generation time while keeping the long-form mode.
-- Fixed the app's background-autostart Python executable lookup and repaired the test runner's current `app/tests` discovery/path setup.
-- Validation: 371 tests passed, 0 skipped, 0 failed; compilation and 30-day proactive simulation passed. A 2-sample local benchmark measured 2.38 s median minimal short chat with `llama3.2:3b` at 4 threads. A separate thread sweep overlapped the already-open desktop app and forced model reloads, so its tool-call timings were too noisy to guide CPU tuning.
-
 ## Companion conversation update — 2026-10-30
 
 - Replaced the multi-part generated opener with one short English day question. It uses no model call, so the chat is ready sooner and has no availability yes/no step.

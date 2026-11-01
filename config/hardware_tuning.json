@@ -1,0 +1,32 @@
+{
+  "fingerprint": "Intel(R) Core(TM) i5-8265U CPU @ 1.60GHz|4|8|12",
+  "num_thread": 6,
+  "num_ctx": 3072,
+  "results": [
+    {
+      "num_thread": 2,
+      "prompt_tps": 18.4,
+      "gen_tps": 3.63,
+      "est_turn_s": 49.2
+    },
+    {
+      "num_thread": 3,
+      "prompt_tps": 26.6,
+      "gen_tps": 7.23,
+      "est_turn_s": 30.9
+    },
+    {
+      "num_thread": 4,
+      "prompt_tps": 30.8,
+      "gen_tps": 7.91,
+      "est_turn_s": 27.1
+    },
+    {
+      "num_thread": 6,
+      "prompt_tps": 33.8,
+      "gen_tps": 8.42,
+      "est_turn_s": 24.9
+    }
+  ],
+  "saved_at": "2026-11-01 23:20:20"
+}

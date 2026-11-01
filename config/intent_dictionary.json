@@ -232,8 +232,8 @@
         "(?i)\\b(?:give|send|set|create|make)\\b.*\\b(?:reminder|nudge|notification)\\b.*\\b(?:in|after)\\s+(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty|sixty|ninety|a)\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)\\b"
       ],
       "confirm_prompt": "It sounds like you may want to set a reminder. Is that right? Reply YES or NO.",
-      "details_prompt": "What should I remind you about? For example, drink water.",
-      "missing_time_prompt": "How long from now should I remind you? For example, in 20 minutes or tomorrow at 9 AM.",
+      "details_prompt": "What should I remind you about, and when? Example: Remind me in 20 minutes to drink water, or Remind me tomorrow at 9 AM to study.",
+      "missing_time_prompt": "What should I remind you about? When should I remind you? Example: in 20 minutes, tomorrow at 9 AM, or at 20:30 today.",
       "retry_prompt": "Please include what to remind you about and a time, for example: 'Remind me in 20 minutes to drink water', or say CANCEL.",
       "help_example": "Remind me in 20 minutes to drink water"
     },

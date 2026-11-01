@@ -124,7 +124,7 @@ def main():
     args = parser.parse_args()
 
     settings = json.loads((ROOT / "config" / "settings.json").read_text(encoding="utf-8"))
-    base_url = args.url or settings.get("ollama_url", "http://127.0.0.1:11434")
+    base_url = args.url or settings.get("ollama_url", "http://localhost:11434")
     models = args.models or [settings.get("model_chat", "llama3.2:3b")]
     runs = max(1, min(10, args.runs))
     base_options = dict(settings.get("ollama_options") or {})

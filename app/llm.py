@@ -10,7 +10,6 @@ Always keeps num_gpu = 0 (CPU only) because the GPU gave garbage output.
 import requests
 import time
 import json
-import threading
 
 
 class LLMError(Exception):
@@ -51,23 +50,17 @@ def trim_to_sentence(text):
 
 
 class OllamaClient:
-    def __init__(self, url="http://127.0.0.1:11434", model="qwen2.5:1.5b",
+    def __init__(self, url="http://localhost:11434", model="llama3.2:3b",
                  options=None, timeout=180, keep_alive="30m", embedding_model="nomic-embed-text"):
         self.url = url.rstrip("/")
         self.model = model
         self.embedding_model = str(embedding_model or "nomic-embed-text")
         self.last_embed_metrics = {}
         # Keep CPU-only. Do not remove num_gpu.
-        self.options = dict(options) if options else {"num_gpu": 0, "num_thread": 4, "num_ctx": 3072, "num_predict": 40, "temperature": 0.2}
+        self.options = dict(options) if options else {"num_gpu": 0, "num_thread": 4, "num_ctx": 3072, "num_predict": 96, "temperature": 0.2}
         self.options["num_gpu"] = 0
         self.timeout = timeout
         self.keep_alive = keep_alive
-        # Chat, proactive title checks, and quiet memory review share one local model.
-        # Serialize calls so background work cannot compete with foreground chat.
-        self._chat_lock = threading.Lock()
-        self._active_request_lock = threading.Lock()
-        self._active_response = None
-        self._active_cancel_event = None
         # Latest Ollama timing counters, useful for real-device benchmarking.
         self.last_metrics = {}
 
@@ -94,9 +87,9 @@ class OllamaClient:
             return []
 
     def _equivalent_installed_tag(self, installed_names):
-        """Resolve equivalent aliases for the selected local model.
+        """Resolve equivalent aliases (e.g. llama3.2 -> llama3.2:3b/latest).
 
-        Do not silently change model families or parameter sizes.
+        Do not silently change to a different model family or from 3B to 1B.
         """
         preferred = str(self.model or "").strip()
         if preferred in installed_names:
@@ -108,11 +101,6 @@ class OllamaClient:
                 if candidate in installed_names:
                     return candidate
             return None
-        if base == "qwen2.5" and preferred.split(":", 1)[-1].lower() == "1.5b":
-            for candidate in ("qwen2.5:1.5b", "qwen2.5:1.5b-instruct-q4_K_M"):
-                if candidate in installed_names:
-                    return candidate
-            return None
         if preferred and ":" not in preferred:
             candidate = preferred + ":latest"
             if candidate in installed_names:
@@ -120,48 +108,19 @@ class OllamaClient:
         return None
 
     def _model_not_found_error(self, installed_names):
-        preferred = str(self.model or "qwen2.5:1.5b")
+        preferred = str(self.model or "llama3.2:3b")
         inventory = ", ".join(installed_names[:12]) if installed_names else "could not read local model list"
-        command = "ollama pull " + preferred
+        if preferred.split(":", 1)[0].lower() == "llama3.2":
+            command = "ollama pull llama3.2:3b"
+        else:
+            command = "ollama pull " + preferred
         return LLMError(
             "The configured chat model '" + preferred + "' is not installed in the Ollama server at " + self.url + ". "
             "Installed local models: " + inventory + ". Run `" + command + "` in Command Prompt, then restart Study Buddy. "
             "If the model is installed already, run `ollama list` and confirm Study Buddy uses the same Ollama server/URL."
         )
 
-    def cancel_active_request(self, cancel_event):
-        """Close a matching low-priority stream after its owner requests cancellation."""
-        if cancel_event is None or not cancel_event.is_set():
-            return False
-        with self._active_request_lock:
-            if self._active_cancel_event is not cancel_event or self._active_response is None:
-                return False
-            response = self._active_response
-        try:
-            response.close()
-            return True
-        except Exception:
-            return False
-
-    def chat_completion(self, messages, tools=None, on_token=None, options=None, response_format=None,
-                        cancel_event=None):
-        """Serialize access to the resident model and include time spent queued."""
-        queued_at = time.perf_counter()
-        with self._chat_lock:
-            queue_wait_ms = round((time.perf_counter() - queued_at) * 1000, 1)
-            try:
-                if cancel_event is not None and cancel_event.is_set():
-                    self.last_metrics = {"queue_wait_ms": queue_wait_ms, "cancelled": True}
-                    return {"message": {"role": "assistant", "content": ""}, "cancelled": True}
-                return self._chat_completion_unlocked(
-                    messages, tools=tools, on_token=on_token, options=options,
-                    response_format=response_format, cancel_event=cancel_event,
-                )
-            finally:
-                self.last_metrics["queue_wait_ms"] = queue_wait_ms
-
-    def _chat_completion_unlocked(self, messages, tools=None, on_token=None, options=None, response_format=None,
-                                  cancel_event=None):
+    def chat_completion(self, messages, tools=None, on_token=None, options=None, response_format=None):
         """Return Ollama's structured assistant message, including tool_calls.
 
         Tool definitions are JSON Schema function declarations. This method only
@@ -210,28 +169,7 @@ class OllamaClient:
             raise LLMError("Ollama error " + str(r.status_code) + ": " + r.text[:300])
         try:
             if streaming:
-                if cancel_event is not None:
-                    with self._active_request_lock:
-                        self._active_response = r
-                        self._active_cancel_event = cancel_event
-                    try:
-                        if cancel_event.is_set():
-                            r.close()
-                            return {"message": {"role": "assistant", "content": ""}, "cancelled": True}
-
-                        def continue_stream(fragment):
-                            if cancel_event.is_set():
-                                return False
-                            return on_token(fragment) is not False
-
-                        data = self._consume_chat_stream(r, continue_stream)
-                    finally:
-                        with self._active_request_lock:
-                            if self._active_response is r:
-                                self._active_response = None
-                                self._active_cancel_event = None
-                else:
-                    data = self._consume_chat_stream(r, on_token)
+                data = self._consume_chat_stream(r, on_token)
             else:
                 data = r.json()
             if not isinstance(data.get("message"), dict):
@@ -252,10 +190,6 @@ class OllamaClient:
             }
             return data
         except requests.RequestException as e:
-            if cancel_event is not None and cancel_event.is_set():
-                self.last_metrics = {"request_ms": round((time.perf_counter() - started) * 1000, 1),
-                                     "cancelled": True}
-                return {"message": {"role": "assistant", "content": ""}, "cancelled": True}
             self.last_metrics = {"request_ms": round((time.perf_counter() - started) * 1000, 1),
                                  "error": type(e).__name__}
             raise LLMError("Ollama stream was interrupted. Please retry; any unfinished response was not committed. (" + str(e) + ")")
@@ -371,10 +305,10 @@ class OllamaClient:
         except (ValueError, TypeError):
             raise LLMError("Unexpected embedding response from Ollama.")
 
-    def chat(self, messages, on_token=None, options=None, response_format=None, cancel_event=None):
+    def chat(self, messages, on_token=None, options=None, response_format=None):
         """Text-only call; optional request-scoped options and streaming callback."""
         data = self.chat_completion(messages, on_token=on_token, options=options,
-                                    response_format=response_format, cancel_event=cancel_event)
+                                    response_format=response_format)
         if data.get("cancelled"):
             return ""
         try:

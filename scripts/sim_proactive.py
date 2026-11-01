@@ -124,16 +124,13 @@ def main():
   for _ in range(250):
    t=time.perf_counter(); student['policy'].evaluate(now=now,ctx=ctx,state=state); times.append((time.perf_counter()-t)*1000)
   median=statistics.median(times); maximum=max(times)
-  p95=sorted(times)[int(len(times)*0.95)-1]
   print('30-day simulation: PASS (4 students; 30 days; no LLM/network/thread use)')
   for s in students:
    c=s['counters']; print(f"{s['name']}: nudges={c['shown']}, triggers={c['triggers']}, max/day={max(c['by_day'].values(),default=0)}")
   print(f"nudge-averse thresholds: <=1/day from day 4; <=2 total from day 8 through day 30 (under 0.1/day); observed day4+ max={max(averse_day_counts[3:])}, day8+ total={sum(averse_day_counts[7:])}")
   print(f"nudge-friendly: {sum(friendly['counters']['by_day'].values())} nudges in 30 days (non-zero, cap <=3/day)")
-  print(f"policy evaluate warm-cache: median={median:.3f} ms, p95={p95:.3f} ms, max={maximum:.3f} ms (250 perf_counter samples)")
-  # Maximum can include an unrelated Windows scheduler pause; guard typical policy
-  # cost with p95 and report the maximum for visibility instead of flaky failure.
-  assert median<5 and p95<5, f"warm-cache policy exceeded 5ms at p95: median={median:.3f} p95={p95:.3f}"
+  print(f"policy evaluate warm-cache: median={median:.3f} ms, max={maximum:.3f} ms (250 perf_counter samples)")
+  assert median<5 and maximum<5, f"warm-cache policy exceeded 5ms: median={median:.3f} max={maximum:.3f}"
  finally:
   for s in students: s['memory'].close()
 if __name__=='__main__': main()

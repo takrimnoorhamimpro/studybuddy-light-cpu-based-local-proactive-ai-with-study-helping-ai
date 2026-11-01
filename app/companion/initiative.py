@@ -23,25 +23,26 @@ class InitiativePolicy:
   now=self.clock() if now is None else float(now); ctx=dict(ctx or {}); state=dict(state or {})
   # Non-negotiable gates run before any scoring or loop mutation.
   if not self._setting('proactive_enabled', '1') or not state.get('proactive_enabled',True): return None
-  has_window_context=bool(ctx.get('has_window_context'))
-  if (state.get('busy') or state.get('dialog_pending') or state.get('typing') or state.get('worker_busy')
-      or not state.get('user_quiet', True)
-      or (state.get('active') is False and not has_window_context)): return None
+  if state.get('busy') or state.get('dialog_pending') or state.get('typing') or state.get('worker_busy') or state.get('active') is False: return None
   if state.get('paused') or now<float(state.get('pause_until',0)): return None
-  # Window activity may show where attention is directed, but chat activity gets
-  # a quiet window before any initiative can interrupt the conversation.
+  # A stable, informative foreground title is useful while the user is active;
+  # only long inactivity, private context, or an active chat should suppress it.
+  has_window_context=bool(ctx.get('has_window_context') or ctx.get('has_specific_title_clue'))
+  # The desktop idle and title-stability checks are the interruption boundary
+  # for window prompts. Do not add another elapsed-time cooldown after a chat.
   if not has_window_context and now-float(state.get('last_interaction_ts',0))<120: return None
+  if has_window_context and not (0 <= float(state.get('idle_seconds', 0)) < 900): return None
   quiet_explicit=bool(ctx.get('quiet_explicit', True))
   if self._quiet(now,ctx): return None
-  if ctx.get('private') or ctx.get('private_context') or ctx.get('meeting') or ctx.get('app_category') in ('Private','Meeting'): return None
-  cap=max(0,min(5,int(state.get('daily_cap',self.config.get('daily_cap_default',0)))))
+  if ctx.get('private') or ctx.get('private_context') or ctx.get('meeting') or ctx.get('own_window') or ctx.get('app_category') in ('Private','Meeting'): return None
+  cap=max(0,min(5,int(state.get('daily_cap',self.config.get('daily_cap_default',3)))))
   day_start=datetime.datetime.fromtimestamp(now).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
   # Window-title prompts are event-based and deduplicated by the observed context
   # in the desktop app. Do not suppress a genuinely new window because of a timer
   # or a shared daily count. Other initiative types retain their daily safety cap.
   if not has_window_context:
-   if cap>0 and int(state.get('limiter_daily_count',0))>=cap: return None
-   if cap>0 and self._event_count('nudge_shown',since=day_start)>=cap: return None
+   if int(state.get('limiter_daily_count',0))>=cap: return None
+   if self._event_count('nudge_shown',since=day_start)>=cap: return None
   triggers=[]
   base_values=self.config.get('trigger_base_value',{}) if isinstance(self.config.get('trigger_base_value',{}),dict) else {}
   if self._setting('tier_loops','1') and self._setting('tier_facts','1') and self.open_loops:
@@ -59,8 +60,12 @@ class InitiativePolicy:
    triggers.append(('wind_down',float(base_values.get('wind_down',.2)),1.0,'The configured late-night wind-down time has arrived.',render_template('wind_down'),{}))
   if has_window_context and state.get('title_clue_enabled',True):
    full_title=' '.join(str(ctx.get('window_title') or '').split())[:240]
-   repeat_checkin=bool(state.get('same_title_repeat_due'))
-   triggers.append(('title_clue',float(base_values.get('title_clue',.7)),1.0,'A stable foreground window is open.',None,{'app_name':ctx.get('app_name','unknown'),'app_category':ctx.get('app_category','Other'),'window_title':full_title,'repeat_checkin':repeat_checkin}))
+   title=full_title[:90]
+   app=' '.join(str(ctx.get('app_name') or 'that app').split())[:40]
+   app_is_in_title=bool(title and app.casefold() in title.casefold())
+   location=f' open in {app}' if title and not app_is_in_title else ''
+   text=(f'Hey, my guess is you may be looking at “{title}”{location}—am I close?') if title else f"Hey, I noticed {app} is open. Are you free for a quick chat?"
+   triggers.append(('title_clue',float(base_values.get('title_clue',.7)),1.0,'A stable foreground window is open during an active study session.',text,{'app_name':ctx.get('app_name','unknown'),'app_category':ctx.get('app_category','Other'),'window_title':full_title}))
   if state.get('cli_mode'):
    triggers=[item for item in triggers if item[0] in ('open_loop_due','session_return')]
   if not triggers: return None
@@ -68,7 +73,6 @@ class InitiativePolicy:
   scored=[]
   for trigger,base,fit,reason,txt,meta in triggers:
    if not quiet_explicit and trigger in ('open_loop_due','usual_study_start','session_return') and self._quiet(now, {'quiet':None}): continue
-   if ctx.get('own_window'): continue
    if not self._setting('trigger_enabled_'+trigger,'1'): continue
    cooldowns=self.config.get('trigger_cooldown_minutes',{}) if isinstance(self.config.get('trigger_cooldown_minutes',{}),dict) else {}
    trigger_cooldown=max(0,int(cooldowns.get(trigger,0)))
@@ -101,8 +105,8 @@ class InitiativePolicy:
   score,trigger,reason,txt,meta=max(scored,key=lambda x:(x[0],x[1]))
   if score<float(self.config.get('trigger_threshold',.08)): return None
   nid=hashlib.sha256(f'{trigger}|{now:.3f}|{meta}'.encode()).hexdigest()[:20]
-  # Every proactive foreground title uses one isolated model generation so the
-  # wording and the kind of curiosity can adapt to the actual app/title.
+  # Build title-based openings asynchronously from the sanitized title so the
+  # companion can make a grounded, natural observation without blocking chat.
   return NudgeDecision(nid,trigger,reason,txt,trigger=='title_clue',meta)
  def record_shown(self,decision,now=None):
   now=self.clock() if now is None else float(now)

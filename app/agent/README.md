@@ -1,6 +1,6 @@
 # Milo tool-calling agent
 
-Study Buddy uses Ollama's native chat tool-calling protocol with request-scoped tool selection. See [`../../CPU_OPTIMIZED_ARCHITECTURE_v11.md`](../../CPU_OPTIMIZED_ARCHITECTURE_v11.md) for the CPU profile, benchmark flow and design rationale.
+Study Buddy uses Ollama's native chat tool-calling protocol with request-scoped tool selection. See [`../../CPU_OPTIMIZED_ARCHITECTURE.md`](../../CPU_OPTIMIZED_ARCHITECTURE.md) for the CPU profile, benchmark flow and design rationale.
 
 ## Modules
 

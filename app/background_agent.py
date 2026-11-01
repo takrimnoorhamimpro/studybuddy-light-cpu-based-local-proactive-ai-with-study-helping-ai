@@ -80,10 +80,19 @@ def main():
     state_path = os.path.join(user_dir, "background_state.json")
     state = load_json(state_path, {})
     db = Memory(os.path.join(user_dir, "memory.db"))
+    def _tuned_options(current):
+        # Must match the GUI's options exactly, otherwise Ollama reloads the model on every switch.
+        fallback = {"num_gpu": 0, "num_thread": 4, "num_ctx": 3072, "num_predict": 96, "temperature": 0.2}
+        merged = dict(current, ollama_options=current.get("ollama_options", fallback))
+        try:
+            import hardware_profile
+            return hardware_profile.resolve_options(merged, os.path.join(ROOT, "config"))[0]
+        except Exception:
+            return merged["ollama_options"]
     llm = OllamaClient(
-        url=settings.get("ollama_url", "http://127.0.0.1:11434"),
-        model=settings.get("model_chat", "qwen2.5:1.5b"),
-        options=settings.get("ollama_options", {"num_gpu": 0, "num_thread": 4, "num_ctx": 3072, "num_predict": 40, "temperature": 0.2}),
+        url=settings.get("ollama_url", "http://localhost:11434"),
+        model=settings.get("model_chat", "llama3.2:3b"),
+        options=_tuned_options(settings),
         timeout=240,
         keep_alive=resolve_keep_alive(settings),
         embedding_model=settings.get("model_embed", "nomic-embed-text"),
@@ -153,10 +162,7 @@ def main():
             # consolidated at the next idle opportunity instead of waiting for another night.
             scheduled_run_due = in_window and state.get("last_lifecycle_day") != today_key
             aged_backlog_due = aged_backlog and retry_due
-            # Never let nightly summaries/personality work compete with an open
-            # Study Buddy session; reminders continue to work in the background.
-            if (not desktop_is_running() and idle_seconds() >= idle_required
-                    and (scheduled_run_due or aged_backlog_due)
+            if (idle_seconds() >= idle_required and (scheduled_run_due or aged_backlog_due)
                     and settings.get("memory_daily_consolidation_enabled", True) and retry_due):
                 state["last_lifecycle_attempt"] = now_epoch
                 try:

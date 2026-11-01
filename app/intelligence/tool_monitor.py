@@ -2,17 +2,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import wraps
 import os
-import math
 import sqlite3
 import threading
 import time
-import uuid
-
-
-_CURRENT_TRACE_ID = ContextVar("studybuddy_trace_id", default=None)
 
 
 class ToolMonitor:
@@ -40,47 +34,16 @@ class ToolMonitor:
             )
         """)
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_tool_events_started ON tool_events(started_at DESC)")
-        columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(tool_events)").fetchall()}
-        if "trace_id" not in columns:
-            self.db.execute("ALTER TABLE tool_events ADD COLUMN trace_id TEXT")
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_tool_events_trace ON tool_events(trace_id,id)")
         self.db.commit()
-
-    @contextmanager
-    def request_trace(self):
-        """Correlate privacy-safe monitor events generated during one chat turn."""
-        trace_id = uuid.uuid4().hex
-        token = _CURRENT_TRACE_ID.set(trace_id)
-        try:
-            yield trace_id
-        finally:
-            _CURRENT_TRACE_ID.reset(token)
 
     def start(self, tool_id: str, tool_name: str, source: str, summary: str = "") -> int:
         with self._lock:
             cur = self.db.execute(
-                "INSERT INTO tool_events(tool_id,tool_name,source,status,started_at,summary,trace_id) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (tool_id, tool_name, source, "running", time.time(), summary[:240], _CURRENT_TRACE_ID.get()),
+                "INSERT INTO tool_events(tool_id,tool_name,source,status,started_at,summary) VALUES(?,?,?,?,?,?)",
+                (tool_id, tool_name, source, "running", time.time(), summary[:240]),
             )
             self.db.commit()
             return int(cur.lastrowid)
-
-    def mark_flow_node(self, node_id: str) -> None:
-        """Record that a privacy-safe context node was used by the current chat."""
-        labels = {
-            "desktop": ("Desktop context used", "Filtered app/title context supplied; content omitted"),
-            "camera": ("Camera context used", "Local expression summary supplied; image omitted"),
-            "voice": ("Voice input used", "Recognized local speech submitted as chat text; audio omitted"),
-            "store": ("Local conversation storage used", "Chat turn stored in SQLite; message text omitted"),
-            "memory_context": ("My World context used", "Bounded relevant consented facts supplied; content omitted"),
-            "proactive": ("Proactive context used", "The current reply followed a proactive check-in"),
-        }
-        entry = labels.get(str(node_id))
-        if not entry:
-            return
-        event_id = self.start("flow_" + str(node_id), entry[0], "Chat flow", entry[1])
-        self.finish(event_id, "success")
 
     def finish(self, event_id: int, status: str = "success", error: str = "") -> None:
         finished = time.time()
@@ -133,54 +96,17 @@ class ToolMonitor:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def latest_chat_trace(self, limit: int = 250) -> list[dict]:
-        """Return one chat's correlated event path, with no arguments or chat text."""
-        with self._lock:
-            row = self.db.execute(
-                "SELECT trace_id FROM tool_events WHERE tool_id='chat_request' AND trace_id IS NOT NULL "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return []
-            rows = self.db.execute(
-                "SELECT id,tool_id,tool_name,source,status,started_at,finished_at,duration_ms "
-                "FROM tool_events WHERE trace_id=? ORDER BY id LIMIT ?",
-                (str(row["trace_id"]), max(1, min(int(limit), 500))),
-            ).fetchall()
-        return [dict(item) for item in rows]
-
     def latency_summary(self, tool_id: str = "local_ai") -> dict:
         """Return real observed latency only; no synthetic estimates are created."""
         with self._lock:
             rows = self.db.execute(
-                "SELECT id,trace_id,started_at,duration_ms FROM tool_events WHERE tool_id=? AND duration_ms IS NOT NULL "
-                "AND status='success' AND trace_id IN ("
-                "SELECT trace_id FROM tool_events WHERE tool_id='chat_request' AND trace_id IS NOT NULL) "
-                "ORDER BY id DESC LIMIT 300", (str(tool_id),)
+                "SELECT duration_ms FROM tool_events WHERE tool_id=? AND duration_ms IS NOT NULL "
+                "AND status='success' ORDER BY id DESC LIMIT 100", (str(tool_id),)
             ).fetchall()
-        unique = []
-        for row in reversed(rows):
-            if unique:
-                previous = unique[-1]
-                same_trace = row["trace_id"] == previous["trace_id"]
-                same_start = abs(float(row["started_at"]) - float(previous["started_at"])) < 0.02
-                same_duration = abs(int(row["duration_ms"]) - int(previous["duration_ms"])) < 1500
-                if same_trace and same_start and same_duration:
-                    continue  # Collapse nested chat()/chat_completion() wrappers.
-            unique.append(row)
-        unique = unique[-100:]
-        last_ms = int(unique[-1]["duration_ms"]) if unique else None
-        values = sorted(max(0, int(row["duration_ms"])) for row in unique)
+        values = [max(0, int(row["duration_ms"])) for row in rows if row["duration_ms"] is not None]
         if not values:
-            return {"samples": 0, "average_ms": None, "median_ms": None, "p90_ms": None, "last_ms": None}
-        p90_index = min(len(values) - 1, max(0, math.ceil(len(values) * 0.9) - 1))
-        return {
-            "samples": len(values),
-            "average_ms": int(sum(values) / len(values)),
-            "median_ms": int(values[len(values) // 2]) if len(values) % 2 else int((values[len(values)//2 - 1] + values[len(values)//2]) / 2),
-            "p90_ms": int(values[p90_index]),
-            "last_ms": last_ms,
-        }
+            return {"samples": 0, "average_ms": None, "last_ms": None}
+        return {"samples": len(values), "average_ms": int(sum(values) / len(values)), "last_ms": values[0]}
 
     def active_count(self) -> int:
         with self._lock:
