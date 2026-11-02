@@ -225,8 +225,15 @@ class ChatCore:
         if not self._is_operational_turn(user_text, reply):
             self.history.append({"role": "user", "content": user_text})
             self.history.append({"role": "assistant", "content": reply})
-            keep = max(1, int(self.settings.get("recent_turns", 2))) * 2
-            self.history = self.history[-(keep * 2):]
+            # Chunked sliding window: grow up to `recent_turns`, then cut back to `recent_turns_min` in one go.
+            # The conversation prefix then stays identical for several messages in a row, so Ollama can reuse
+            # its cached work instead of re-reading the history every turn.
+            cap = max(1, int(self.settings.get("recent_turns", 2)))
+            # Small windows (1-2 turns) keep strict sliding, so they never remember less than configured.
+            default_floor = cap if cap <= 2 else max(2, cap // 2)
+            floor = max(1, min(cap, int(self.settings.get("recent_turns_min", default_floor))))
+            if len(self.history) > cap * 2:
+                self.history = self.history[-(floor * 2):]
         if self.memory:
             self.memory.add_turn("user", user_text)
             if persist_assistant:
@@ -1275,6 +1282,8 @@ Rules:
                     kwargs.pop("options", None)
                 if cancel_event is not None and "on_token" in parameters:
                     kwargs["on_token"] = lambda _chunk: not cancel_event.is_set()
+                if cancel_event is not None and "cancel_event" in parameters:
+                    kwargs["cancel_event"] = cancel_event
             except (TypeError, ValueError):
                 pass
             response = method(messages, **kwargs)
@@ -1450,6 +1459,8 @@ Rules:
                         kwargs.pop("options", None)
                     if cancel_event is not None and "on_token" in parameters:
                         kwargs["on_token"] = lambda _chunk: not cancel_event.is_set()
+                    if cancel_event is not None and "cancel_event" in parameters:
+                        kwargs["cancel_event"] = cancel_event
                 except (TypeError, ValueError):
                     pass
                 response = method(messages, **kwargs)

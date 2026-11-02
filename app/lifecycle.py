@@ -336,6 +336,8 @@ class LifecycleService:
             if ("response_format" in params or any(
                     param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())):
                 chat_kwargs["response_format"] = MEMORY_REVIEW_SCHEMA
+            if cancel_event and "cancel_event" in params:
+                chat_kwargs["cancel_event"] = cancel_event     # abort instantly, even mid prompt-reading
         except (TypeError, ValueError):
             pass
         raw = self.llm.chat(messages, **chat_kwargs)

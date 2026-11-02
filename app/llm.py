@@ -7,13 +7,109 @@ This file just says "play this" and gets the reply back.
 Always keeps num_gpu = 0 (CPU only) because the GPU gave garbage output.
 """
 
-import requests
-import time
+import http.client
 import json
+import socket
+import threading
+import time
+import urllib.parse
+
+import requests
 
 
 class LLMError(Exception):
     """Raised when Ollama is not running or gives a bad answer."""
+
+
+class _Cancelled(Exception):
+    """Internal: the caller cancelled this request (e.g. the user started typing)."""
+
+
+class _RawResponse:
+    """Minimal requests-like response over http.client so a blocked request can be aborted instantly."""
+
+    def __init__(self, conn, resp, done, cancel_event):
+        self._conn, self._resp, self._done, self._cancel = conn, resp, done, cancel_event
+        self.status_code = resp.status
+        self._text = None
+
+    def _aborted(self):
+        return self._cancel is not None and self._cancel.is_set()
+
+    @property
+    def text(self):
+        if self._text is None:
+            try:
+                self._text = self._resp.read().decode("utf-8", errors="replace")
+            except (OSError, http.client.HTTPException, ValueError):
+                if self._aborted():
+                    raise _Cancelled()
+                raise requests.ConnectionError("connection lost while reading the reply")
+            finally:
+                self.close()
+        return self._text
+
+    def json(self):
+        return json.loads(self.text)
+
+    def iter_lines(self):
+        try:
+            while True:
+                line = self._resp.readline()
+                if not line:
+                    return
+                yield line.rstrip(b"\r\n")
+        except (OSError, http.client.HTTPException, ValueError):
+            if self._aborted():
+                return                      # aborted on purpose: end the stream quietly
+            raise requests.ConnectionError("connection lost while streaming the reply")
+
+    def close(self):
+        self._done.set()
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+
+def _cancellable_post(url, body, timeout, cancel_event):
+    """POST JSON like requests.post, but closing the socket the moment cancel_event is set.
+
+    Ollama reads the whole prompt before it sends a single byte, so a normal client cannot stop a
+    low-priority job (memory review, proactive message) during that phase. Dropping the connection
+    makes Ollama abandon the work, freeing the CPU for the user's message right away.
+    """
+    parts = urllib.parse.urlsplit(url)
+    limit = max(timeout) if isinstance(timeout, (tuple, list)) else timeout
+    conn = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=limit)
+    done = threading.Event()
+
+    def watchdog():
+        while not done.wait(0.1):
+            if cancel_event.is_set():
+                for _ in range(50):          # the socket only exists after connect(); wait for it briefly
+                    sock = getattr(conn, "sock", None)
+                    if sock is not None:
+                        try: sock.shutdown(socket.SHUT_RDWR)
+                        except OSError: pass
+                        break
+                    if done.wait(0.05):
+                        break
+                try: conn.close()
+                except Exception: pass
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    try:
+        conn.request("POST", parts.path or "/", body=json.dumps(body).encode("utf-8"),
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+    except (OSError, http.client.HTTPException) as exc:
+        done.set()
+        if cancel_event.is_set():
+            raise _Cancelled()
+        raise requests.ConnectionError(str(exc))
+    return _RawResponse(conn, resp, done, cancel_event)
 
 
 def resolve_keep_alive(settings):
@@ -120,7 +216,20 @@ class OllamaClient:
             "If the model is installed already, run `ollama list` and confirm Study Buddy uses the same Ollama server/URL."
         )
 
-    def chat_completion(self, messages, tools=None, on_token=None, options=None, response_format=None):
+    def chat_completion(self, messages, tools=None, on_token=None, options=None, response_format=None,
+                        cancel_event=None):
+        """Return Ollama's structured assistant message, including tool_calls.
+
+        Pass ``cancel_event`` (a threading.Event) for low-priority background work: setting it aborts the
+        request immediately, even while Ollama is still reading the prompt, and returns {"cancelled": True}.
+        """
+        try:
+            return self._chat_completion_inner(messages, tools, on_token, options, response_format, cancel_event)
+        except _Cancelled:
+            self.last_metrics = {"error": "cancelled"}
+            return {"message": {"role": "assistant", "content": ""}, "cancelled": True}
+
+    def _chat_completion_inner(self, messages, tools, on_token, options, response_format, cancel_event):
         """Return Ollama's structured assistant message, including tool_calls.
 
         Tool definitions are JSON Schema function declarations. This method only
@@ -143,8 +252,14 @@ class OllamaClient:
         if tools is not None:
             body["tools"] = tools
         started = time.perf_counter()
+
+        def post():
+            if cancel_event is not None:
+                return _cancellable_post(self.url + "/api/chat", body, self.timeout, cancel_event)
+            return requests.post(self.url + "/api/chat", json=body, timeout=self.timeout, stream=streaming)
+
         try:
-            r = requests.post(self.url + "/api/chat", json=body, timeout=self.timeout, stream=streaming)
+            r = post()
         except requests.RequestException as e:
             self.last_metrics = {"request_ms": round((time.perf_counter() - started) * 1000, 1),
                                  "error": type(e).__name__}
@@ -156,7 +271,7 @@ class OllamaClient:
                 self.model = resolved
                 body["model"] = resolved
                 try:
-                    r = requests.post(self.url + "/api/chat", json=body, timeout=self.timeout, stream=streaming)
+                    r = post()
                 except requests.RequestException as e:
                     self.last_metrics = {"request_ms": round((time.perf_counter() - started) * 1000, 1),
                                          "error": type(e).__name__}
@@ -170,6 +285,9 @@ class OllamaClient:
         try:
             if streaming:
                 data = self._consume_chat_stream(r, on_token)
+                if cancel_event is not None and cancel_event.is_set():
+                    data["cancelled"] = True
+                    data.setdefault("message", {"role": "assistant", "content": ""})
             else:
                 data = r.json()
             if not isinstance(data.get("message"), dict):
@@ -305,10 +423,29 @@ class OllamaClient:
         except (ValueError, TypeError):
             raise LLMError("Unexpected embedding response from Ollama.")
 
-    def chat(self, messages, on_token=None, options=None, response_format=None):
+    def running_info(self):
+        """What Ollama actually loaded (like `ollama ps`): size, CPU/GPU split, context. {} if unavailable."""
+        try:
+            data = requests.get(self.url + "/api/ps", timeout=3).json()
+        except (requests.RequestException, ValueError):
+            return {}
+        wanted = str(self.model or "").split(":")[0].casefold()
+        for item in data.get("models") or []:
+            name = str(item.get("name") or item.get("model") or "")
+            if name.casefold().split(":")[0] != wanted:
+                continue
+            size = float(item.get("size") or 0)
+            vram = float(item.get("size_vram") or 0)
+            gpu_share = int(round(100 * vram / size)) if size else 0
+            return {"name": name, "size_gb": round(size / 1024 ** 3, 2), "gpu_percent": gpu_share,
+                    "cpu_percent": 100 - gpu_share, "context_length": item.get("context_length"),
+                    "expires_at": item.get("expires_at")}
+        return {}
+
+    def chat(self, messages, on_token=None, options=None, response_format=None, cancel_event=None):
         """Text-only call; optional request-scoped options and streaming callback."""
         data = self.chat_completion(messages, on_token=on_token, options=options,
-                                    response_format=response_format)
+                                    response_format=response_format, cancel_event=cancel_event)
         if data.get("cancelled"):
             return ""
         try:

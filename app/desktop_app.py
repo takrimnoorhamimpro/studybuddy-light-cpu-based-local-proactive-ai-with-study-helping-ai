@@ -240,7 +240,9 @@ class StudyBuddyApp:
         ttk.Button(token_frame, text="Auto-tune", command=self.auto_tune_hardware).pack(side="left", padx=(8,0))
         self._refresh_token_widgets()
         self.hardware_label_var=tk.StringVar(value=self._hardware_summary())
-        ttk.Label(self.root, textvariable=self.hardware_label_var, foreground="#8293a8", font=("Segoe UI",8), padding=(12,0,12,2)).pack(fill="x")
+        ttk.Label(self.root, textvariable=self.hardware_label_var, foreground="#8293a8", font=("Segoe UI",8), padding=(12,0,12,2), wraplength=900, justify="left").pack(fill="x")
+        self.root.after(6000, self._refresh_ollama_status)
+        self.root.after(60000, self._refresh_ollama_status)
         bottom=ttk.Frame(self.root, padding=(12,0,12,8)); bottom.pack(fill="x")
         self.entry=tk.Text(bottom, height=3, wrap="word", font=("Segoe UI",10)); self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Control-Return>", self._send_event)
@@ -259,9 +261,35 @@ class StudyBuddyApp:
             return "Hardware auto-tuning is off or unavailable."
         try:
             import hardware_profile
-            return "Detected: "+hardware_profile.describe(profile, getattr(self.core.llm,"options",None))
+            text="Detected: "+hardware_profile.describe(profile, getattr(self.core.llm,"options",None))
         except Exception:
-            return "Hardware detected."
+            text="Hardware detected."
+        return text+getattr(self,"_ollama_status_text","")
+
+    def _refresh_ollama_status(self):
+        """Ask Ollama what it really loaded (CPU vs GPU, context size) without blocking the UI."""
+        def worker():
+            text=""
+            try:
+                info=self.core.llm.running_info()
+                if info:
+                    wanted=(getattr(self.core.llm,"options",None) or {}).get("num_ctx")
+                    text="  |  Ollama: %s, %.1f GB, %d%% CPU, ctx %s" % (info["name"], info["size_gb"], info["cpu_percent"], info.get("context_length") or "?")
+                    if info["gpu_percent"]:
+                        text+="  ⚠ part of the model is on the GPU (this app expects CPU-only)"
+                    elif wanted and info.get("context_length") and int(info["context_length"]) != int(wanted):
+                        text+="  ⚠ loaded ctx differs from the app's (%s): the model may be reloading between requests" % wanted
+                else:
+                    text="  |  Ollama: model not loaded yet (loads on the first message)"
+            except Exception:
+                return
+            def apply():
+                self._ollama_status_text=text
+                try: self.hardware_label_var.set(self._hardware_summary())
+                except Exception: pass
+            try: self.root.after(0, apply)
+            except Exception: pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def auto_tune_hardware(self):
         """One-time benchmark of thread counts on the real model; result is saved and reused."""
@@ -284,6 +312,7 @@ class StudyBuddyApp:
                 record=hardware_profile.calibrate(self.core.llm, profile, config_dir, progress=progress)
                 self.core.llm.options["num_thread"]=int(record["num_thread"])
                 self.root.after(0, lambda: self.hardware_label_var.set(self._hardware_summary()))
+                self.root.after(500, self._refresh_ollama_status)
             except Exception as exc:
                 self.root.after(0, lambda e=exc: self._status(f"Auto-tune failed: {e}"))
             finally:
@@ -1388,6 +1417,12 @@ class StudyBuddyApp:
             _var = tk.StringVar(value=str(self.settings.get(_key, _default)))
             ttk.Spinbox(_row, from_=_low, to=_high, width=7, textvariable=_var).pack(side="right")
             timing_vars[_key] = (_var, _low, _high)
+        ttk.Label(frame, text="Conversation memory", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(8, 0))
+        _turns_row = ttk.Frame(frame); _turns_row.pack(fill="x", pady=1)
+        ttk.Label(_turns_row, text="Recent exchanges the AI remembers (more = smarter follow-ups, slower replies)").pack(side="left")
+        _turns_var = tk.StringVar(value=str(self.settings.get("recent_turns", 2)))
+        ttk.Spinbox(_turns_row, from_=1, to=8, width=7, textvariable=_turns_var).pack(side="right")
+        timing_vars["recent_turns"] = (_turns_var, 1, 8)
         card_var = tk.BooleanVar(value=bool(self.settings.get("profile_card_enabled", True)))
         ttk.Checkbutton(frame, text="Give the AI a short My World profile card (what you chose to share) in every reply",
                         variable=card_var).pack(anchor="w", pady=2)
@@ -1540,7 +1575,9 @@ class StudyBuddyApp:
                 messagebox.showerror("Settings", "Window check-in timings must be whole numbers inside the allowed ranges.", parent=win); return
             self.settings.update(timing_values, window_checkin_llm_text=bool(llm_text.get()),
                                  profile_card_enabled=bool(card_var.get()))
-            try: self.core.settings["profile_card_enabled"] = bool(card_var.get())
+            try:
+                self.core.settings["profile_card_enabled"] = bool(card_var.get())
+                self.core.settings["recent_turns"] = timing_values["recent_turns"]
             except Exception: pass
             try: cap_value=max(0,min(5,int(daily_cap.get())))
             except ValueError:
