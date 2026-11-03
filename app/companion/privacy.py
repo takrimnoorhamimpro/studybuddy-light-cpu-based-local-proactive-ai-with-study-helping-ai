@@ -162,7 +162,11 @@ class PrivacyService:
     def delete_rhythm(self) -> int:
         with self.memory._db_lock:
             cur=self.memory.db.execute("DELETE FROM rhythm_buckets"); count=cur.rowcount
-            self.memory.db.execute("DELETE FROM rhythm_days"); self.memory.db.commit()
+            self.memory.db.execute("DELETE FROM rhythm_days")
+            for t in ("scene_obs","scene_clusters","scene_visits","scene_terms","scene_arms","scene_arm_done"):
+                try: self.memory.db.execute("DELETE FROM "+t)
+                except Exception: pass
+            self.memory.db.commit()
         self._audit("rhythm","learned_patterns_deleted"); return count
 
     def delete_nudge_history(self) -> dict:

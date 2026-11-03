@@ -133,6 +133,22 @@ def open_camera_preview(parent, settings, on_state_change=None, consent_already_
                             cv2.putText(frame, f"{name.title():10s} {score:5.1%}", (16, 51 + idx * line_h), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (230, 230, 230), 1, cv2.LINE_AA)
                     elif not overlay.get("face_detected"):
                         cv2.putText(frame, "No face detected", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+                scene_text = (overlay or {}).get("scene_text") if overlay else ""
+                if scene_text:
+                    fh, fw = frame.shape[:2]
+                    words, lines, cur = scene_text.split(), [], ""
+                    for word in words:
+                        if len(cur) + len(word) + 1 > max(20, fw // 9):
+                            lines.append(cur); cur = word
+                        else:
+                            cur = (cur + " " + word).strip()
+                    if cur:
+                        lines.append(cur)
+                    lines = lines[-4:]
+                    top = fh - 10 - 22 * len(lines)
+                    cv2.rectangle(frame, (0, top - 6), (fw, fh), (24, 24, 24), -1)
+                    for i, line in enumerate(lines):
+                        cv2.putText(frame, line, (8, top + 16 + i * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 height, width = frame.shape[:2]
                 max_w, max_h = max(320, preview.winfo_width()), max(240, preview.winfo_height())

@@ -34,7 +34,9 @@
     "usual_study_start": 0.7,
     "session_return": 0.35,
     "wind_down": 0.2,
-    "title_clue": 1.0
+    "title_clue": 1.0,
+    "scene_dwell": 0.8,
+    "scene_change": 0.6
   },
   "trigger_threshold": 0.05,
   "acceptance_floor": 0.15,
@@ -50,8 +52,18 @@
     "usual_study_start": 1380,
     "session_return": 1380,
     "wind_down": 1380,
-    "title_clue": 0
+    "title_clue": 0,
+    "scene_dwell": 60,
+    "scene_change": 5
   },
   "annoyance_per_nudge": 0.08,
-  "annoyance_per_ignore": 0.12
+  "annoyance_per_ignore": 0.12,
+  "scene": {
+    "dense_cluster_threshold": 0.72,
+    "gap_seconds": 240,
+    "min_visits": 5,
+    "min_days": 3,
+    "dwell_floor_seconds": 600,
+    "z_threshold": 1.5
+  }
 }

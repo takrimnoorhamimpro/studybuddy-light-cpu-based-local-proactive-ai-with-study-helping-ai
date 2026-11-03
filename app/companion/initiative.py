@@ -6,8 +6,8 @@ from companion.templates import render_template
 class NudgeDecision:
  nudge_id:str; trigger:str; reason:str; text:str|None; needs_llm:bool=False; meta:dict=field(default_factory=dict)
 class InitiativePolicy:
- def __init__(self,memory,personal_companion,config=None,*,open_loops=None,rhythm=None,feedback=None,clock=time.time):
-  self.memory=memory; self.pc=personal_companion; self.config=config or {}; self.open_loops=open_loops; self.rhythm=rhythm; self.feedback=feedback; self.clock=clock
+ def __init__(self,memory,personal_companion,config=None,*,open_loops=None,rhythm=None,feedback=None,scene=None,clock=time.time):
+  self.memory=memory; self.pc=personal_companion; self.config=config or {}; self.open_loops=open_loops; self.rhythm=rhythm; self.feedback=feedback; self.scene=scene; self.clock=clock
  def _setting(self,k,default='0'): return str(self.pc.setting(k,default)).lower() not in ('0','false','off','no','')
  def _event_count(self,kind,trigger=None,since=0):
   with self.memory._db_lock:
@@ -54,6 +54,14 @@ class InitiativePolicy:
     hour=datetime.datetime.fromtimestamp(now).hour
     if min(abs(hour-h) for h in p.study_start_hours)<=0:
      triggers.append(('usual_study_start',float(base_values.get('usual_study_start',.7)),1.0,'It is within your learned study-category start hour.',render_template('usual_study_start'),{'hour':hour}))
+  if self.scene is not None and self._setting('trigger_enabled_scene_dwell','0') and state.get('camera_active'):
+   sig=self.scene.dwell_signal(now)
+   if sig and sig.should_nudge:
+    triggers.append(('scene_dwell',float(base_values.get('scene_dwell',.8)),max(0.05,sig.fit),sig.reason,self.scene.message(sig),{'cluster_id':sig.cluster_id,'dwell_s':int(sig.dwell_s),'median_s':int(sig.median_s),'visit_start':sig.visit_start,'z':round(sig.z,2)}))
+  if self.scene is not None and self._setting('trigger_enabled_scene_change','1') and state.get('camera_active'):
+   chg=self.scene.change_signal(now)
+   if chg:
+    triggers.append(('scene_change',float(base_values.get('scene_change',.6)),1.0 if chg['novel'] else .75,'The camera noticed a change in what you are doing or where you are.',self.scene.change_message(chg),{'cluster_id':chg['cluster_id'],'novel':bool(chg['novel'])}))
   if state.get('session_return'):
    triggers.append(('session_return',float(base_values.get('session_return',.35)),1.0,'A new session started after at least eight hours away.',render_template('session_return'),{}))
   if state.get('wind_down'):
@@ -73,7 +81,7 @@ class InitiativePolicy:
   scored=[]
   for trigger,base,fit,reason,txt,meta in triggers:
    if not quiet_explicit and trigger in ('open_loop_due','usual_study_start','session_return') and self._quiet(now, {'quiet':None}): continue
-   if not self._setting('trigger_enabled_'+trigger,'1'): continue
+   if not self._setting('trigger_enabled_'+trigger,'0' if trigger=='scene_dwell' else '1'): continue
    cooldowns=self.config.get('trigger_cooldown_minutes',{}) if isinstance(self.config.get('trigger_cooldown_minutes',{}),dict) else {}
    trigger_cooldown=max(0,int(cooldowns.get(trigger,0)))
    if trigger_cooldown and self._event_count('nudge_shown',trigger,now-trigger_cooldown*60): continue
@@ -91,6 +99,7 @@ class InitiativePolicy:
     parity=int(hashlib.sha256(trigger.encode()).hexdigest()[:2],16)%2
     if (datetime.datetime.fromtimestamp(now).date().toordinal()+parity)%2: continue
    acceptance=(1.0 if trigger=='title_clue' else
+               self.scene.sample_acceptance(meta.get('cluster_id'),hour,float(self.config.get('acceptance_floor',.15))) if trigger in ('scene_dwell','scene_change') and self.scene else
                self.feedback.acceptance(trigger,hour,now) if self.feedback else .5)
    today=self._event_count('nudge_shown',since=day_start)
    recent_ignores=self._event_count('nudge_ignored',trigger,now-86400)
@@ -113,6 +122,10 @@ class InitiativePolicy:
   if self.feedback:
    safe_meta={k:v for k,v in dict(decision.meta or {}).items() if k not in ('title','app_name','window_title','text','message')}
    self.feedback.event('nudge_shown',decision.trigger,decision.reason,decision.nudge_id,safe_meta,now)
+  if decision.trigger=='scene_change' and self.scene: self.scene.consume_change()
+  if decision.trigger=='scene_dwell' and self.scene:
+   try: self.scene.mark_nudged(self.scene.dwell_signal(now) or type('S',(),{'visit_start':decision.meta.get('visit_start')})())
+   except Exception: pass
   if decision.trigger=='open_loop_due' and self.open_loops: self.open_loops.mark_surfaced(decision.meta['loop_id'],decision.meta['step'],now)
  def explain_last(self):
   with self.memory._db_lock: row=self.memory.db.execute("SELECT trigger,reason,ts FROM companion_events WHERE kind='nudge_shown' ORDER BY ts DESC LIMIT 1").fetchone()

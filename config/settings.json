@@ -42,8 +42,12 @@
   "reply_token_limit": 0,
   "window_checkin_new_seconds": 15,
   "window_checkin_same_minutes": 2,
-  "window_checkin_return_minutes": 1,
-  "window_checkin_min_gap_seconds": 10,
+  "window_checkin_return_minutes": 5,
+  "window_checkin_min_gap_seconds": 1,
   "window_checkin_max_followups": 0,
-  "window_checkin_llm_text": true
+  "window_checkin_llm_text": true,
+  "scene_vision_enabled": true,
+  "scene_vision_model": "moondream",
+  "scene_vision_interval_seconds": 10,
+  "profile_card_enabled": true
 }

@@ -4,6 +4,11 @@ echo Installing offline webcam and expression-recognition dependencies...
 py -3.12 -m pip install opencv-python pillow onnxruntime numpy
 if errorlevel 1 goto fail
 if not exist models mkdir models
+if not exist models\haarcascade_frontalface_default.xml (
+  echo Downloading face detector XML...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/haarcascade_frontalface_default.xml' -OutFile 'models\haarcascade_frontalface_default.xml' -ErrorAction Stop"
+  if errorlevel 1 goto fail
+)
 if exist models\emotion-ferplus-8.onnx (
   echo FER+ ONNX model already exists; keeping the existing local copy.
   goto done

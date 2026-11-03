@@ -36,6 +36,7 @@ from companion.open_loops import OpenLoopTracker
 from companion.rhythm import RhythmTracker
 from companion.feedback import FeedbackLogger
 from companion.initiative import InitiativePolicy
+from companion.scene_model import SceneSituationModel
 from companion.relationship import RelationshipBuilder
 from proactive_policy import classify_user_boundary
 
@@ -94,8 +95,11 @@ class ChatCore:
         self.open_loop_tracker = OpenLoopTracker(memory, self.personal_companion, self.companion_config) if memory and self.personal_companion else None
         self.rhythm_tracker = RhythmTracker(memory, self.personal_companion, self.companion_config) if memory and self.personal_companion else None
         self.feedback_logger = FeedbackLogger(memory, self.companion_config) if memory else None
+        def _scene_embed(text):
+            return self.llm.embed(["clustering: " + str(text)])[0]
+        self.scene_model = SceneSituationModel(memory, self.companion_config, embedder=_scene_embed) if memory else None
         self.initiative_policy = InitiativePolicy(memory, self.personal_companion, self.companion_config,
-            open_loops=self.open_loop_tracker, rhythm=self.rhythm_tracker, feedback=self.feedback_logger) if memory and self.personal_companion else None
+            open_loops=self.open_loop_tracker, rhythm=self.rhythm_tracker, feedback=self.feedback_logger, scene=self.scene_model) if memory and self.personal_companion else None
         self.relationship_builder = RelationshipBuilder(memory, self.personal_companion) if memory and self.personal_companion else None
         self.last_initiative_nudge_id = None
         self.last_initiative_nudge_text = None
@@ -110,6 +114,7 @@ class ChatCore:
         self.timer_callback = None
         # Optional UI-supplied local facial-feature text; raw frames never enter ChatCore.
         self.visual_context_provider = None
+        self.camera_active_provider = None
         # Desktop app injects a live, authoritative capability summary. Tests/CLI
         # may leave this unset; ChatCore remains usable without the GUI layer.
         self.capability_context_provider = None
@@ -620,12 +625,14 @@ class ChatCore:
                       "or some brow-lowering), then offer at most one tentative interpretation if useful. If the "
                       "signals are weak or mixed, say the expression is unclear rather than inventing a feeling. "
                       "If asked about mood, explain that expression is only a clue and ask how they actually feel. "
-                      "Never claim identity, gaze, appearance, surroundings, or details not in the supplied text. "
+                      "If a 'Scene seen by the local vision model' line is supplied, you may describe the setting, objects and activity it states, "
+                      "tentatively and in your own words; it is a small model's guess, so say so if unsure. "
+                      "Never claim identity, gaze, appearance, or details not in the supplied text. "
                       "Do not repeat the whole technical feature list verbatim.\n"
                 )
                 # Small local models follow relevant evidence better when it is near the active request too.
                 user_text = (
-                    "Use this current local facial-expression model output as context (not proof of emotion): "
+                    "Use this current local camera analysis as context (expression is not proof of emotion; the scene text is a small model's guess): "
                     + visual_context + "\n\nUser's message: " + user_text
                 )
         tool_names = []
@@ -2203,6 +2210,16 @@ Rules:
             self._recent_proactive_window_expires_at = time.time() + self._window_memory_seconds()
             self._recent_proactive_window_turns_left = self._window_memory_turns()
         recent_window = self._recent_window_snapshot()
+        camera_on = False
+        try:
+            camera_on = bool(callable(self.camera_active_provider) and self.camera_active_provider())
+        except Exception:
+            camera_on = False
+        # While the camera is on, "see/look/what am I doing" means the camera, not the window title.
+        window_words = bool(re.search(r"(?i)\b(?:window|tab|title|screen|browser|app|youtube|video title)\b", str(user_text or "")))
+        if camera_on and not window_words:
+            recent_window = None
+            title_availability_turn = False
         if title_availability_turn and self._recent_proactive_window:
             recent_window = dict(self._recent_proactive_window)
             recent_window["age_seconds"] = max(0, int(time.time() - float(recent_window.get("observed_at") or time.time())))
@@ -2345,7 +2362,7 @@ Rules:
         # Authoritative desktop state questions are answered from the fresh local
         # snapshot; do not let the small model contradict sensor state or reuse old chat.
         if level == "none":
-            desktop_reply = (None if recent_window_relevant or title_availability_turn
+            desktop_reply = (None if recent_window_relevant or title_availability_turn or (camera_on and not window_words)
                              else self._direct_desktop_context_reply(user_text))
             if desktop_reply is not None:
                 self._remember(user_text, desktop_reply)

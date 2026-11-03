@@ -13,6 +13,7 @@ from lifecycle import LifecycleService
 from features.camera.policy import CameraPolicy
 from features.camera.preview import open_camera_preview
 from features.camera.expression import CameraExpressionAnalyzer
+from features.camera.scene import SceneAnalyzer
 import re
 from security.windows_efs import encrypt_folder, check_efs_file
 from context_engine import ContextEngine
@@ -79,7 +80,9 @@ class StudyBuddyApp:
         self.camera_declined_this_chat = False
         self.last_camera_topic_ts = 0.0
         self.expression_analyzer = None
+        self.scene_analyzer = None
         self.core.visual_context_provider = self._visual_context
+        self.core.camera_active_provider = lambda: bool(self.camera_active)
         self.camera_policy = CameraPolicy(
             enabled=bool(self.settings.get("webcam_enabled", False)),
             minimum_interval_minutes=int(self.settings.get("camera_min_interval_minutes", 5)),
@@ -1452,8 +1455,8 @@ class StudyBuddyApp:
         ttk.Label(cap_row,text="Daily initiative nudge cap (0–5)").pack(side="left")
         ttk.Spinbox(cap_row,from_=0,to=5,textvariable=daily_cap,width=5).pack(side="left",padx=8)
         trigger_vars={}
-        for trigger,label in (("open_loop_due","Deadline nudges"),("usual_study_start","Usual study-time nudges"),("session_return","Session-return check-ins"),("wind_down","Wind-down notes"),("title_clue","Window-title check-ins")):
-            trigger_vars[trigger]=tk.BooleanVar(value=str(self.personal_companion.setting("trigger_enabled_"+trigger,"1")).lower() not in ("0","false","off","no"))
+        for trigger,label in (("open_loop_due","Deadline nudges"),("usual_study_start","Usual study-time nudges"),("session_return","Session-return check-ins"),("wind_down","Wind-down notes"),("title_clue","Window-title check-ins"),("scene_change","Camera: comment when what I see changes"),("scene_dwell","Camera: unusually long in one situation (learns your routine; off by default)")):
+            trigger_vars[trigger]=tk.BooleanVar(value=str(self.personal_companion.setting("trigger_enabled_"+trigger,"0" if trigger=="scene_dwell" else "1")).lower() not in ("0","false","off","no"))
             ttk.Checkbutton(frame,text=label,variable=trigger_vars[trigger]).pack(anchor="w",pady=1)
         def delete_patterns():
             from companion.privacy import PrivacyService
@@ -1561,7 +1564,7 @@ class StudyBuddyApp:
                     self.personal_companion.set_setting(tier_key,"1" if enabled else "0")
                     self.personal_companion.add_consent_ledger(tier_key,bool(enabled),tier_key+"_toggle")
             for trigger,enabled_var in trigger_vars.items():
-                old=str(self.personal_companion.setting("trigger_enabled_"+trigger,"1")).lower() not in ("0","false","off","no")
+                old=str(self.personal_companion.setting("trigger_enabled_"+trigger,"0" if trigger=="scene_dwell" else "1")).lower() not in ("0","false","off","no")
                 if old != bool(enabled_var.get()):
                     self.personal_companion.set_setting("trigger_enabled_"+trigger,"1" if enabled_var.get() else "0")
                     self.personal_companion.add_consent_ledger("initiative:"+trigger,bool(enabled_var.get()),"trigger_toggle")
@@ -1627,9 +1630,33 @@ class StudyBuddyApp:
         ttk.Button(frame, text="Save settings", command=save).pack(anchor="e", pady=8)
 
     def _visual_context(self):
-        if not self.camera_active or not self.expression_analyzer:
+        if not self.camera_active:
             return ""
-        return self.expression_analyzer.get_recent_summary(max_age_seconds=12)
+        parts = []
+        if self.expression_analyzer:
+            expr = self.expression_analyzer.get_recent_summary(max_age_seconds=12)
+            if expr:
+                parts.append("Facial expression: " + expr)
+        if self.scene_analyzer:
+            self.scene_analyzer.request_now()
+            scene = self.scene_analyzer.get_recent_description(max_age_seconds=90)
+            if scene:
+                parts.append("Scene seen by the local vision model (setting, objects, activity): " + scene)
+        return "\n".join(parts)
+
+    def _on_camera_frame(self, frame):
+        if self.expression_analyzer and self.expression_analyzer.available:
+            self.expression_analyzer.process_bgr_frame(frame)
+        if self.scene_analyzer and self.scene_analyzer.available:
+            self.scene_analyzer.submit_frame(frame)
+
+    def _camera_overlay(self):
+        data = self.expression_analyzer.get_live_overlay() if self.expression_analyzer and self.expression_analyzer.available else {}
+        data = dict(data or {})
+        if self.scene_analyzer:
+            data["scene_text"] = self.scene_analyzer.get_recent_description(max_age_seconds=60)
+            data["scene_error"] = self.scene_analyzer.last_error
+        return data
 
     @staticmethod
     def _reply_requests_camera_permission(reply):
@@ -1808,7 +1835,12 @@ class StudyBuddyApp:
             "how do i look", "how am i look like", "how am i looking", "what do i look like",
             "describe my appearance", "can you describe me", "am i smiling",
         ))
-        if (self._is_camera_status_question(low) or camera_followup or expression_or_mood_question
+        scene_ready = bool(self.camera_active and self.scene_analyzer
+                           and self.scene_analyzer.get_recent_description(max_age_seconds=90))
+        if self.camera_active and self.scene_analyzer and not scene_ready and general_vision_question:
+            self._append("Buddy", "The camera is on and the vision model is still looking at the first frames. Ask again in a few seconds.", "buddy")
+            return True
+        if not scene_ready and (self._is_camera_status_question(low) or camera_followup or expression_or_mood_question
                 or (self.camera_active and visual_inspection_request) or general_vision_question):
             # Answer from the actual camera/analysis state. A small model must not
             # override permission, preview, or analysis availability with a guess.
@@ -1851,6 +1883,8 @@ class StudyBuddyApp:
             if not self.settings.get("webcam_enabled", False):
                 self._append("Buddy", "Camera access is disabled. Enable 'Allow camera requests from chat' in Settings first. The camera remains off.", "buddy")
             elif self.camera_active:
+                if scene_ready:
+                    return False        # let the chat model answer from the scene + expression context
                 self._append("Buddy", "The camera preview is already active. I can classify a visible-expression pattern locally, but it does not prove your mood.", "buddy")
             else:
                 self.camera_consent_pending = True
@@ -1872,11 +1906,26 @@ class StudyBuddyApp:
             self.expression_analyzer = CameraExpressionAnalyzer(model_path)
             if not self.expression_analyzer.available:
                 self._append("Buddy", "Camera preview can still work, but offline facial-feature analysis is unavailable: " + self.expression_analyzer.last_error + " Run install_camera.bat once while online to install ONNX Runtime and download the model asset.", "meta")
+        if getattr(self.core, "scene_model", None) is not None and not getattr(self, "_scene_embed_checked", False):
+            self._scene_embed_checked = True
+            def _probe():
+                try: self.core.llm.embed(["clustering: test"])
+                except Exception:
+                    self.events.put(("status", "Situation learning needs the embedding model: run `ollama pull nomic-embed-text`."))
+            threading.Thread(target=_probe, daemon=True).start()
+        if self.scene_analyzer is None and self.settings.get("scene_vision_enabled", True):
+            self.scene_analyzer = SceneAnalyzer(
+                url=self.settings.get("ollama_url", "http://localhost:11434"),
+                model=self.settings.get("scene_vision_model", "moondream"),
+                interval_seconds=self.settings.get("scene_vision_interval_seconds", 10),
+                should_pause=lambda: bool(self.busy),
+                on_description=(self.core.scene_model.observe if getattr(self.core, 'scene_model', None) else None),
+            )
         window = open_camera_preview(
             self.root, self.settings, on_state_change=self._camera_state_changed,
             consent_already_given=consent_already_given,
-            on_frame=(self.expression_analyzer.process_bgr_frame if self.expression_analyzer and self.expression_analyzer.available else None),
-            on_overlay=(self.expression_analyzer.get_live_overlay if self.expression_analyzer and self.expression_analyzer.available else None),
+            on_frame=self._on_camera_frame,
+            on_overlay=self._camera_overlay,
         )
         if window is not None:
             self._camera_stop_callback = getattr(window, "_studybuddy_stop", None)
@@ -1886,6 +1935,12 @@ class StudyBuddyApp:
 
     def _camera_state_changed(self, active):
         self.camera_active = bool(active)
+        if not active and getattr(self, "scene_analyzer", None) is not None:
+            self.scene_analyzer.close()
+            self.scene_analyzer = None
+            try:
+                if getattr(self.core, "scene_model", None): self.core.scene_model.end_session()
+            except Exception: pass
         dashboard = getattr(self, "_intelligence_dashboard", None)
         if dashboard is not None:
             try:
@@ -2721,6 +2776,8 @@ class StudyBuddyApp:
                                                         self.settings.get("proactive_switch_stability_seconds", 15), 5, 3600))
                 window_mode = self._window_checkin_mode(window_context_signature, title_clue, now) if snapshot else None
                 title_clue = window_mode is not None
+                if self.camera_active:      # camera mode: Buddy comments on what it SEES, not on the window title
+                    title_clue = False; window_mode = None
                 title_can_replace_idle_invite = bool(
                     title_clue and builder and builder.phase in ("availability", "topic_permission", "conversation"))
                 relationship_dialog_pending = bool(
@@ -2767,7 +2824,11 @@ class StudyBuddyApp:
                     "daily_cap": int(self.settings.get("initiative_daily_cap", self.core.companion_config.get("daily_cap_default", 3))),
                     "session_return": session_return, "wind_down": wind_down,
                     "title_clue_enabled": bool(self.awareness_enabled and title_clue),
+                    "camera_active": bool(self.camera_active),
                 }
+                try:
+                    if getattr(self.core, "scene_model", None): self.core.scene_model.sync_feedback(now)
+                except Exception: pass
                 ctx = {"app_category": category, "app_name": safe.get("app_name", "unknown"),
                        "window_title": safe.get("window_title", ""),
                        "private": bool(safe.get("private_context")), "meeting": category == "Meeting",
