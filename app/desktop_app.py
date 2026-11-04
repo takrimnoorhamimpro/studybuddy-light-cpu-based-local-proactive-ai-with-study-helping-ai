@@ -198,16 +198,20 @@ class StudyBuddyApp:
         self.chat.tag_configure("you", foreground="#7dd3fc", font=("Segoe UI",10,"bold"))
         self.chat.tag_configure("buddy", foreground="#a7f3d0", font=("Segoe UI",10,"bold"))
         self.chat.tag_configure("meta", foreground="#9ca3af", font=("Segoe UI",9,"italic"))
-        hello = (f"Hi! I'm {self.core.buddy_name}. I'm here. I run locally through Ollama.\n\n"
-                 "Camera privacy: camera access is off unless you enable it in Settings. You can say 'look at me' or 'turn on camera' to request access. "
-                 "I may ask permission in a relevant conversation, but I will never activate the camera without your clear yes. "
-                 "If you allow it, optional facial-feature analysis runs locally when its model is installed; raw camera images or video are not sent to Llama or saved. "
-                 "You can say 'stop camera' at any time. Facial signals are only rough clues, not proof of how you feel.\n\n"
-                 "You can ask in your own words to save a note, add/show/complete tasks, set reminders, "
-                 "start a custom-length focus timer or Pomodoro, and list pending reminders. For example: "
-                 "'Keep a note that my exam is Friday', 'Add finishing my assignment to my tasks', "
-                 "'Nudge me in 20 minutes to drink water', or 'Start a 45-minute focus timer'. "
-                 "If I don't understand a request, try 'What built-in commands can you do?' and I'll show examples.")
+        hello = (
+                    f"Hi! I'm {self.core.buddy_name}. I'm here. I run locally through Ollama.\n\n"
+                    f"Camera is off by default — say 'look at me' or 'turn on camera' to enable it. "
+                    f"I'll always ask first and never activate it without your yes.\n\n"
+                    f"Things you can ask me:\n"
+                    f"• 'Set a reminder' / 'Remind me in 20 minutes'\n"
+                    f"• 'Add a task' / 'Show tasks' / 'Complete task'\n"
+                    f"• 'Set a timer'\n"
+                    f"• 'Focused' — to start a Pomodoro session\n"
+                    f"• 'Look at me' or 'Turn on camera' — to enable scene awareness"
+                    f"• 'Don't disturb me for 20 minutes'\n"
+                    f"• 'What are your capabilities'\n"
+                    f"• 'pause' - to take a break from proactive feature\n"
+                )
         self._append("Buddy", hello, "buddy")
         activity_frame = ttk.Frame(self.root, padding=(12, 0, 12, 4))
         activity_frame.pack(fill="x")

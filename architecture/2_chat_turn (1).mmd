@@ -1,0 +1,46 @@
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'15px','actorBkg':'#ddd6fe','actorBorder':'#6d28d9','actorTextColor':'#2e1065','signalColor':'#334155','noteBkgColor':'#fef3c7','noteBorderColor':'#b45309','activationBkgColor':'#e0e7ff','sequenceNumberColor':'#ffffff'}}}%%
+sequenceDiagram
+  autonumber
+  actor U as 👤 User
+  participant UI as 💬 Desktop UI
+  participant CC as 🧠 ChatCore
+  participant SF as 🚨 Safety
+  participant IR as 🧭 Intent router
+  participant TO as 🛠 ToolOrchestrator
+  participant PB as 🧩 PromptBuilder
+  participant LL as 🤖 llama3.2:3b
+  participant DB as 🗄 memory.db
+  U->>UI: types a message
+  rect rgb(219,234,254)
+    Note over UI: Camera commands first (consent, stop, "see me")
+    UI->>CC: handle_message(text)
+  end
+  rect rgb(254,226,226)
+    CC->>SF: check_input
+    alt high risk
+      SF-->>UI: fixed crisis reply + trusted contacts
+    end
+  end
+  rect rgb(237,233,254)
+    CC->>IR: pending dialog? (consent / pause / onboarding)
+    IR-->>CC: handled or released
+    Note over CC: names, greetings, fast paths (tasks, reminders, timers)
+  end
+  rect rgb(254,243,199)
+    opt not handled by code
+      CC->>TO: pick tools for this request (BM25)
+      TO->>LL: chat + tool schemas
+      LL-->>TO: tool calls
+      TO->>DB: run allow-listed handlers
+      CC->>PB: persona + Profile Card + camera/scene text + window title
+      PB->>LL: prompt (budget ≤ 1800 est. tokens)
+      LL-->>CC: streamed reply
+    end
+  end
+  rect rgb(220,252,231)
+    CC->>SF: check_output
+    CC->>DB: save turn
+    Note over CC,DB: rule extractor → candidate memory (no model call)
+    CC-->>UI: reply
+  end
+  UI-->>U: shows reply

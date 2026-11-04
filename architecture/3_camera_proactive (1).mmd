@@ -1,0 +1,59 @@
+%%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':35,'rankSpacing':45},'themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'15px','lineColor':'#475569'}}}%%
+flowchart TB
+  subgraph S1["① SEE"]
+    direction LR
+    CAM["📷 Webcam frame"]:::sense --> SC["🏠 SceneAnalyzer thread<br/>every ≥10 s · paused while chat busy"]:::sense --> V["moondream caption"]:::sense
+    CAM --> EX["🙂 Expression model<br/>face crop → FER+"]:::sense
+    EX --> CTXT["also sent to the chat prompt<br/>as text only, never as an image"]:::brain
+    V --> CTXT
+  end
+  subgraph S2["② CLEAN"]
+    direction LR
+    CL{"clean_caption<br/>repetition or junk?"}:::filter
+    RETRY["retry once, stricter"]:::filter
+    DROP["discard"]:::bad
+    CL -->|bad| RETRY --> CL
+    CL -->|bad again| DROP
+  end
+  subgraph S3["③ UNDERSTAND  ·  SceneSituationModel"]
+    direction LR
+    EMB["nomic-embed-text vector"]:::model --> CLU["online clustering<br/>→ situation id"]:::model --> DEB["debounce:<br/>2 agreeing observations"]:::model --> VIS["visit log + your dwell baseline<br/>median · MAD · p80 per situation × time"]:::model
+    LEX["word-overlap detector<br/>(if no embedding model)"]:::model
+  end
+  subgraph S4["④ DECIDE"]
+    direction LR
+    CHG["scene_change<br/>camera start or new situation"]:::pro
+    DW["scene_dwell<br/>unusually long here for YOU"]:::pro
+    POL["InitiativePolicy<br/>gates · score · 5 min cooldown"]:::pro
+    TS["Thompson sampling<br/>situation × hour"]:::learn
+    CHG --> POL
+    DW --> POL
+    POL <--> TS
+  end
+  subgraph S5["⑤ SPEAK AND LEARN"]
+    direction LR
+    MSG["💬 nudge text in chat"]:::ui --> OUT{"your reaction"}:::ui --> UPD["update the learned odds<br/>reply +1 · ignore +0.3 · stop +2"]:::learn
+  end
+
+  V --> CL
+  CL -->|good| EMB
+  CL -.->|good, no embeddings| LEX
+  DEB --> CHG
+  LEX --> CHG
+  VIS --> DW
+  POL --> MSG
+  TS <--> UPD
+
+  classDef sense fill:#bbf7d0,stroke:#15803d,stroke-width:2px,color:#052e16
+  classDef filter fill:#fef08a,stroke:#a16207,stroke-width:2px,color:#422006
+  classDef model fill:#ddd6fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+  classDef pro fill:#fed7aa,stroke:#c2410c,stroke-width:2px,color:#431407
+  classDef learn fill:#99f6e4,stroke:#0f766e,stroke-width:2px,color:#042f2e
+  classDef ui fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+  classDef bad fill:#fecaca,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+  classDef brain fill:#e9d5ff,stroke:#7e22ce,stroke-width:2px,color:#3b0764
+  style S1 fill:#f0fdf4,stroke:#15803d,stroke-width:2px,color:#14532d
+  style S2 fill:#fefce8,stroke:#a16207,stroke-width:2px,color:#713f12
+  style S3 fill:#f5f3ff,stroke:#6d28d9,stroke-width:2px,color:#4c1d95
+  style S4 fill:#fff7ed,stroke:#c2410c,stroke-width:2px,color:#7c2d12
+  style S5 fill:#eff6ff,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a
