@@ -1,0 +1,114 @@
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'13px'}}}%%
+classDiagram
+  direction LR
+
+  class StudyBuddyApp {
+    <<app/desktop_app.py>>
+    Tkinter UI, tray icon
+    voice in and out
+    _scheduler_tick()
+  }
+  class ChatCore {
+    handle_message(user_text)
+  }
+  class OllamaClient {
+    <<LLM access>>
+    chat(messages)
+  }
+  class hardware_profile {
+    <<module>>
+    resolve_options()
+    calibrate()
+  }
+  class Safety {
+    check_language()
+    check_input()
+    safe_output()
+  }
+  class IntentRouter {
+    detect()
+    start()
+  }
+  class prompt_builder {
+    <<module>>
+    build_system_prompt()
+    build_messages()
+  }
+  class identity {
+    <<module>>
+    extract_names()
+    wrong_name_claim()
+  }
+  class extractor {
+    <<module>>
+    extract()
+    extract_relationship_candidates()
+  }
+  class Memory {
+    <<SQLite memory.db>>
+  }
+  class PersonalCompanion {
+    candidates, consent, follow-ups
+  }
+  class UserModel {
+    persona_context()
+  }
+  class ProfileCard {
+    build()
+  }
+  class RelationshipBuilder {
+    respond()
+  }
+  class TurnTrace
+  class ToolOrchestrator
+  class ToolRegistry
+  class builtin_tools {
+    <<module>>
+    build_builtin_tool_registry()
+  }
+  class ToolMonitor {
+    <<logs/intelligence.sqlite3>>
+    start()
+    finish()
+  }
+  class CapabilityRegistry
+  class IntelligenceDashboard
+
+  StudyBuddyApp *-- Memory : creates and shares
+  StudyBuddyApp *-- ChatCore
+  StudyBuddyApp *-- ToolMonitor
+  StudyBuddyApp *-- CapabilityRegistry
+  StudyBuddyApp *-- IntelligenceDashboard
+  StudyBuddyApp ..> PersonalCompanion : own instance, same memory
+  StudyBuddyApp ..> builtin_tools : registers tools
+  StudyBuddyApp ..> ToolOrchestrator : injects into ChatCore
+
+  ChatCore *-- OllamaClient
+  ChatCore *-- Safety
+  ChatCore *-- IntentRouter
+  ChatCore *-- PersonalCompanion
+  ChatCore *-- UserModel
+  ChatCore *-- ProfileCard
+  ChatCore *-- RelationshipBuilder
+  ChatCore *-- TurnTrace
+  ChatCore o-- Memory : shared
+  ChatCore o-- ToolOrchestrator : injected
+  ChatCore o-- ToolRegistry : injected
+  ChatCore ..> hardware_profile : CPU options
+  ChatCore ..> prompt_builder : builds prompts
+  ChatCore ..> identity : name rules
+  ChatCore ..> extractor : after each turn
+
+  ToolOrchestrator --> ToolRegistry
+  ToolOrchestrator --> OllamaClient
+  ToolOrchestrator ..> ToolMonitor : logs
+  builtin_tools ..> ToolRegistry : builds
+  IntelligenceDashboard ..> ToolMonitor
+  IntelligenceDashboard ..> CapabilityRegistry
+  PersonalCompanion --> Memory
+  UserModel --> Memory
+  UserModel --> PersonalCompanion
+  ProfileCard --> PersonalCompanion
+  RelationshipBuilder --> PersonalCompanion
+
+  note for ChatCore "Proactive, camera, memory review and background classes are in Figure 3.3(b)"

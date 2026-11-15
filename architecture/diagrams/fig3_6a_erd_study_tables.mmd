@@ -1,0 +1,57 @@
+erDiagram
+  turns {
+    int id PK
+    real ts
+    text role
+    text text
+  }
+  facts {
+    int id PK
+    real ts
+    text text "unique"
+    text source
+  }
+  trusted_people {
+    int id PK
+    text name "unique"
+  }
+  profile {
+    text key PK
+    text value
+  }
+  notes {
+    int id PK
+    real ts
+    text level
+    text period
+    text text
+  }
+  notes_fts {
+    text text "FTS virtual index"
+  }
+  tasks {
+    int id PK
+    text title
+    text details
+    real due_ts
+    text status
+    real created_ts
+    real completed_ts
+  }
+  reminders {
+    int id PK
+    text text
+    real remind_ts
+    int fired
+    real created_ts
+  }
+  personality_versions {
+    int id PK
+    real created_ts
+    text status
+    text reason
+    text character_json
+    text evaluation_json
+  }
+
+  notes ||..|| notes_fts : "text index"

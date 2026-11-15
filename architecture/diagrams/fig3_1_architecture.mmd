@@ -1,0 +1,87 @@
+%%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':30,'rankSpacing':50},'themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'14px','lineColor':'#475569'}}}%%
+flowchart TB
+  STUDENT([Student]):::actor
+
+  subgraph UI["Interface layer (app/desktop_app.py, Tkinter)"]
+    direction LR
+    WIN["Chat window<br/>Tasks, My World, Settings,<br/>Nudge Log, Patterns, Capabilities"]:::ui
+    VOICE["Voice in and out<br/>listens up to 8 s, spoken replies"]:::ui
+    TRAY["Tray icon<br/>autostart"]:::ui
+    TICK["Scheduler tick<br/>every 5 s"]:::ui
+  end
+
+  subgraph CORE["Conversation layer (ChatCore)"]
+    direction LR
+    SAFE["Safety<br/>language, input, output"]:::core --> ROUTE["Code-only paths<br/>IntentRouter, task and timer commands,<br/>name and greeting replies"]:::core --> TOOLS["ToolOrchestrator<br/>approved tools only"]:::core --> PROMPT["Prompt builder<br/>persona, confirmed memory,<br/>profile card, recent turns"]:::core
+  end
+
+  subgraph PRO["Proactive layer"]
+    direction LR
+    CTX["ContextEngine<br/>app category,<br/>filtered window title"]:::pro --> POLICY["InitiativePolicy<br/>gates, score, pause flow,<br/>rate limiter"]:::pro --> FB["FeedbackLogger<br/>RhythmTracker<br/>OpenLoopTracker"]:::pro
+    SCENE["SceneSituationModel<br/>scene clusters and dwell"]:::pro
+  end
+
+  subgraph CAM["Camera (optional, consent gated by CameraPolicy)"]
+    direction LR
+    SCAN["SceneAnalyzer<br/>caption every 10 s"]:::cam
+    EXPR["CameraExpressionAnalyzer<br/>text context only"]:::cam
+  end
+
+  subgraph SVC["Privacy and memory services"]
+    direction LR
+    CONSENT["PersonalCompanion<br/>candidate memory, consent"]:::svc
+    PRIV["PrivacyService<br/>review, delete"]:::svc
+    REVIEW["Memory review<br/>after 90 s idle (LifecycleService)"]:::svc
+    BACKUP["Backup manager<br/>encrypted backup, optional EFS"]:::svc
+  end
+
+  subgraph BG["Background agent (separate process, background_agent.py)"]
+    direction LR
+    REM["Reminder toasts when the<br/>app is closed, late-night nudge"]:::bg
+    NIGHT["Nightly consolidation<br/>02:00 to 05:00 after 10 min idle<br/>summaries, guarded personality update"]:::bg
+  end
+
+  subgraph MODELS["Local models and tuning (CPU only)"]
+    direction LR
+    LLM["Ollama: llama3.2:3b<br/>main chat model"]:::model
+    EMB["Ollama: nomic-embed-text<br/>optional: scene clustering,<br/>tool-selection fallback"]:::model
+    VIS["Ollama: moondream<br/>scene captions"]:::model
+    FER["ONNX FER+<br/>expression, onnxruntime"]:::model
+    SPEECH["faster-whisper and pyttsx3<br/>speech to text, text to speech"]:::model
+    HW["hardware_profile<br/>detect CPU, calibrate threads"]:::model
+  end
+
+  subgraph STORE["Local storage"]
+    direction LR
+    DB[("users/PROFILE/memory.db<br/>one profile database:<br/>study, companion, scene tables")]:::store
+    TEL[("logs/intelligence.sqlite3<br/>tool_events only<br/>(tool-monitor telemetry)")]:::tele
+    CFG[["config/*.json<br/>including hardware_tuning.json"]]:::store
+  end
+
+  STUDENT <--> UI
+  UI <-->|messages and replies| CORE
+  UI <-->|tick in, nudges out| PRO
+  UI -->|starts after consent| CAM
+  UI -->|memory, privacy, backup| SVC
+  CAM -. scene cues .-> PRO
+  CAM -. camera text .-> CORE
+  CORE -->|prompts and tool calls| MODELS
+  CORE <-->|memory, tasks, telemetry| STORE
+  PRO <-->|events, scene tables| STORE
+  SVC --> STORE
+  SVC -->|memory review| MODELS
+  BG --> STORE
+  BG -->|nightly review| MODELS
+  BG -. Windows notifications .-> STUDENT
+  CAM -->|captions, expression| MODELS
+
+  classDef actor fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#451a03
+  classDef ui fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+  classDef core fill:#ddd6fe,stroke:#6d28d9,stroke-width:2px,color:#2e1065
+  classDef pro fill:#fed7aa,stroke:#c2410c,stroke-width:2px,color:#431407
+  classDef svc fill:#fbcfe8,stroke:#be185d,stroke-width:2px,color:#500724
+  classDef cam fill:#bbf7d0,stroke:#15803d,stroke-width:2px,color:#052e16
+  classDef bg fill:#fef3c7,stroke:#a16207,stroke-width:2px,color:#422006
+  classDef model fill:#bbf7d0,stroke:#15803d,stroke-width:2px,color:#052e16
+  classDef store fill:#e2e8f0,stroke:#334155,stroke-width:2px,color:#0f172a
+  classDef tele fill:#f1f5f9,stroke:#64748b,stroke-width:2px,stroke-dasharray:5 3,color:#0f172a

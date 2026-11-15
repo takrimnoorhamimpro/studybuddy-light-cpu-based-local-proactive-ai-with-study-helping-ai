@@ -1,0 +1,64 @@
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'13px','actorBkg':'#ddd6fe','actorBorder':'#6d28d9','actorTextColor':'#2e1065','noteBkgColor':'#fef3c7','noteBorderColor':'#b45309'}}}%%
+sequenceDiagram
+  autonumber
+  actor S as Student
+  participant UI as StudyBuddyApp (UI)
+  participant CC as ChatCore
+  participant SF as Safety
+  participant IR as IntentRouter and direct handlers
+  participant TO as ToolOrchestrator
+  participant PB as Prompt builder
+  participant LL as Ollama llama3.2:3b
+  participant DB as memory.db
+  participant EX as Extractor (rules)
+  participant PC as PersonalCompanion
+
+  S->>UI: types a message
+  UI->>CC: handle_message(text)
+  CC->>SF: check_language
+  alt not English
+    SF-->>UI: fixed English-only reply (not saved)
+    UI-->>S: shows reply
+  else English
+    CC->>SF: check_input (none, medium or high)
+    alt high risk
+      CC->>DB: save turn with fixed safety reply
+      CC-->>UI: fixed safety reply (no model call)
+      UI-->>S: shows reply
+    else none or medium
+      CC->>IR: try code-only paths first
+      Note over CC,IR: In order: busy reply to a nudge, My World check-in, pending dialog, nudge feedback, memory transparency, desktop context, name questions, greeting, capability and memory access, intent confirmation, task, reminder and timer commands
+      alt handled by code
+        IR-->>CC: result without a model call
+        CC->>DB: run approved handler, save turn
+        CC-->>UI: reply
+        UI-->>S: shows reply
+      else needs the model
+        CC->>TO: tools_for_text (BM25, embedding fallback only if weak)
+        TO-->>CC: 0 to 4 tool names
+        CC->>PB: safety core, persona, confirmed memory, profile card, camera text if camera is on
+        Note over CC,PB: Medium risk skips persona and profile card and adds extra-care text
+        PB-->>CC: system prompt and recent turns
+        opt tools were selected
+          CC->>TO: run(messages)
+          TO->>LL: request with tool schemas
+          LL-->>TO: tool call
+          TO->>DB: run allow-listed handler (arguments validated)
+        end
+        CC->>LL: chat (or final pass after the tool result)
+        LL-->>CC: streamed reply
+        CC->>SF: safe_output (also checked while streaming)
+        CC->>CC: fix wrong name claim, prepend fixed care opening if medium
+        CC->>DB: save turn
+        opt risk is none and tier_facts is on
+          CC->>EX: extract candidates (regex, no model call)
+          EX-->>CC: up to 3 candidates
+          CC->>PC: add candidate to queue
+          PC->>DB: personal_nodes and candidate_queue
+          Note over CC,PC: Candidates stay out of prompts until confirmed (stored as confirmed if the student opted into My World memory)
+        end
+        CC-->>UI: reply
+        UI-->>S: shows reply
+      end
+    end
+  end

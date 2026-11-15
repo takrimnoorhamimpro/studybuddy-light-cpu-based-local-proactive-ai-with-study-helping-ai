@@ -1,0 +1,94 @@
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'13px'}}}%%
+classDiagram
+  direction LR
+
+  class StudyBuddyApp {
+    <<app/desktop_app.py>>
+    _scheduler_tick()
+  }
+  class ChatCore
+  class Memory {
+    <<SQLite memory.db>>
+  }
+  class OllamaClient {
+    <<LLM access>>
+  }
+  class InitiativePolicy {
+    evaluate()
+  }
+  class ContextEngine {
+    observe()
+  }
+  class RhythmTracker
+  class FeedbackLogger
+  class OpenLoopTracker {
+    sync()
+  }
+  class SceneSituationModel {
+    observe()
+  }
+  class ProactivePauseFlow
+  class ProactiveRateLimiter
+  class CameraPolicy {
+    can_start()
+  }
+  class SceneAnalyzer {
+    <<optional camera>>
+  }
+  class CameraExpressionAnalyzer {
+    <<optional camera>>
+  }
+  class PrivacyService {
+    delete_rhythm()
+    delete_nudge_history()
+    delete_all_proactive_data()
+  }
+  class LifecycleService {
+    <<lifecycle.py>>
+    review_recent_conversation()
+    consolidate_daily()
+    evolve_personality()
+  }
+  class memory_quality {
+    <<module>>
+    find_low_quality()
+    clean_up()
+  }
+  class BackgroundAgent {
+    <<background_agent.py, own process>>
+    main()
+    notify()
+    idle_seconds()
+  }
+
+  StudyBuddyApp *-- ChatCore
+  StudyBuddyApp *-- ContextEngine
+  StudyBuddyApp *-- CameraPolicy
+  StudyBuddyApp *-- ProactivePauseFlow
+  StudyBuddyApp *-- ProactiveRateLimiter
+  StudyBuddyApp *-- LifecycleService : memory review
+  StudyBuddyApp o-- SceneAnalyzer
+  StudyBuddyApp o-- CameraExpressionAnalyzer
+  StudyBuddyApp ..> PrivacyService : uses
+  StudyBuddyApp ..> memory_quality : cleanup
+  StudyBuddyApp ..> BackgroundAgent : starts
+
+  ChatCore *-- InitiativePolicy
+  ChatCore *-- RhythmTracker
+  ChatCore *-- FeedbackLogger
+  ChatCore *-- OpenLoopTracker
+  ChatCore *-- SceneSituationModel
+  ChatCore o-- Memory : shared
+
+  InitiativePolicy --> Memory
+  InitiativePolicy ..> FeedbackLogger
+  InitiativePolicy ..> RhythmTracker
+  InitiativePolicy ..> OpenLoopTracker
+  InitiativePolicy ..> SceneSituationModel
+  SceneAnalyzer ..> SceneSituationModel : caption text
+  PrivacyService --> Memory
+  LifecycleService --> Memory
+  LifecycleService --> OllamaClient
+  BackgroundAgent ..> LifecycleService : own instance
+  BackgroundAgent ..> OllamaClient : own instance
+  BackgroundAgent ..> Memory

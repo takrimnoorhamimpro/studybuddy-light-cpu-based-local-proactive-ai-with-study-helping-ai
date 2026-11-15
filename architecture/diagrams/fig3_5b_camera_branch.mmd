@@ -1,0 +1,23 @@
+%%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':30,'rankSpacing':45},'themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'14px','lineColor':'#475569'}}}%%
+flowchart TB
+  subgraph B["B. Optional local camera (off unless enabled and permitted)"]
+    direction TB
+    CP{"webcam_enabled<br/>and permission?"}:::gate
+    CP -- no --> OFF["Camera not started<br/>chat still works"]:::bad
+    CP -- yes --> FR["Frame processed in memory<br/>not intended to be saved"]:::cam
+    FR --> SA["Moondream caption<br/>(scene description)"]:::cam
+    FR --> EX["ONNX FER+ expression cue<br/>(experimental)"]:::cam
+    SA --> CLN{"Caption clean?"}:::gate
+    CLN -- no --> DISC["Discard"]:::bad
+    CLN -- yes --> SM["SceneSituationModel<br/>cluster and dwell"]:::cam
+    SM --> CUE["Scene cue<br/>scene_change or scene_dwell"]:::cam
+  end
+
+  CUE --> OUT1["To Figure 3.5(a):<br/>candidate trigger"]:::out
+  EX --> OUT2["To Figure 3.5(a):<br/>text context only"]:::out
+
+  classDef gate fill:#fef08a,stroke:#a16207,stroke-width:2px,color:#422006
+  classDef bad fill:#fecaca,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+  classDef cam fill:#bbf7d0,stroke:#15803d,stroke-width:2px,color:#052e16
+  classDef out fill:#fed7aa,stroke:#c2410c,stroke-width:2px,color:#431407
+  style B fill:#f0fdf4,stroke:#15803d,stroke-width:2px

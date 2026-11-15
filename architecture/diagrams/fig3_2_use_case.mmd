@@ -1,0 +1,74 @@
+%%{init: {'theme':'base','flowchart':{'curve':'linear','nodeSpacing':20,'rankSpacing':40},'themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'14px'}}}%%
+flowchart TB
+  S([Student]):::actor
+
+  subgraph SYS["Study Buddy (Windows desktop)"]
+    direction TB
+    subgraph CORE_UC["Core features (always on)"]
+      direction LR
+      UC1(["Chat and ask study questions"]):::uc
+      UC2(["Manage tasks"]):::uc
+      UC3(["Set reminders and timers"]):::uc
+      UC16(["Get reminders after closing the window<br/>(background agent)"]):::uc
+    end
+    subgraph MEM_UC["Memory and privacy controls"]
+      direction LR
+      UC17(["Answer the getting-to-know-you check-in<br/>(My World)"]):::uc
+      UC4(["Review My World memory"]):::uc
+      UC5(["Confirm, reject or defer memory candidates"]):::uc
+      UC6(["Delete memory and activity data"]):::uc
+    end
+    subgraph PROMPT_UC["Proactive prompt controls"]
+      direction LR
+      UC7(["Pause prompts or switch<br/>trigger types off"]):::uc
+      UC8(["View prompt reason and Nudge Log"]):::uc
+      UC9(["Give prompt feedback"]):::uc
+      UC10(["Set quiet hours and daily limit"]):::uc
+    end
+    subgraph SYS_UC["System and performance"]
+      direction LR
+      UC18(["Open the Capabilities dashboard<br/>tools, models, timing"]):::uc
+      UC19(["Auto-tune the model for my CPU"]):::uc
+    end
+    subgraph SEC_UC["Security"]
+      UC11(["Create or restore encrypted backup"]):::uc
+    end
+    subgraph OPT_UC["Optional features (need user permission)"]
+      direction LR
+      UC12(["Enable rhythm tracking"]):::opt
+      UC13(["Allow camera and scene cues"]):::opt
+      UC14(["Use voice input and output"]):::opt
+      UC15(["Encrypt profile folder with EFS"]):::opt
+    end
+  end
+
+  O([Ollama / local model]):::ext
+  Q([SQLite / local storage]):::ext
+
+  S --> CORE_UC
+  S --> MEM_UC
+  S --> PROMPT_UC
+  S --> SYS_UC
+  S --> SEC_UC
+  S -.-> OPT_UC
+
+  UC1 --- O
+  UC1 --- Q
+  UC2 --- Q
+  UC3 --- Q
+  UC16 --- Q
+  UC18 --- Q
+  UC19 --- O
+  UC13 -.- O
+
+  classDef actor fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#451a03
+  classDef ext fill:#e2e8f0,stroke:#334155,stroke-width:2px,color:#0f172a
+  classDef uc fill:#dbeafe,stroke:#1d4ed8,stroke-width:1.5px,color:#0f172a
+  classDef opt fill:#f1f5f9,stroke:#64748b,stroke-width:1.5px,stroke-dasharray:5 3,color:#0f172a
+  style SYS fill:#f8fafc,stroke:#334155,stroke-width:2px
+  style CORE_UC fill:#eff6ff,stroke:#93c5fd,stroke-width:1px
+  style MEM_UC fill:#fdf4ff,stroke:#d8b4fe,stroke-width:1px
+  style PROMPT_UC fill:#fff7ed,stroke:#fdba74,stroke-width:1px
+  style SYS_UC fill:#f0f9ff,stroke:#7dd3fc,stroke-width:1px
+  style SEC_UC fill:#f0fdf4,stroke:#86efac,stroke-width:1px
+  style OPT_UC fill:#f8fafc,stroke:#94a3b8,stroke-width:1px,stroke-dasharray:5 3

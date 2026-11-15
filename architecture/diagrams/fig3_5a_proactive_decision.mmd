@@ -1,0 +1,38 @@
+%%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':30,'rankSpacing':38},'themeVariables':{'fontFamily':'Segoe UI, Arial','fontSize':'14px','lineColor':'#475569'}}}%%
+flowchart TB
+  subgraph A["A. Proactive decision (StudyBuddyApp tick every 5 s, then InitiativePolicy.evaluate)"]
+    direction TB
+    T["Scheduler tick"]:::step --> C["ContextEngine summary<br/>app category, filtered title, idle time, UI state"]:::step
+    C --> W["Window check-in mode<br/>title stable 15 s, then new, still_here or returned<br/>min gap 90 s, no title clue while the camera is on"]:::step
+    W --> G{"Global gates all pass?<br/>1 proactive on, not busy, typing, in a dialog or paused<br/>2 user active and not in quiet hours<br/>3 not a private, meeting or own window<br/>4 daily cap (not applied to window prompts)"}:::gate
+    G -- no --> N1["No prompt"]:::bad
+    G -- yes --> TR["Candidate triggers, each needing its setting or tier<br/>open_loop_due, usual_study_start, scene_change,<br/>scene_dwell (off by default), session_return,<br/>wind_down, title_clue"]:::step
+    TR --> F1{"Trigger filter passes?<br/>enabled, past cooldown, not muted,<br/>not on a skipped half-rate day"}:::gate
+    F1 -- no --> N1
+    F1 -- yes --> SC["Score = base value × acceptance × fit − annoyance<br/>title_clue: acceptance 1.0, no annoyance<br/>scene cues: Thompson sample from scene_arms<br/>others: Beta mean by trigger and 3-hour bucket<br/>annoyance: 0.08 × nudges today + 0.12 × ignores in 24 h"]:::step
+    SC --> TH{"Best score at or above<br/>trigger_threshold (0.05 in config)?"}:::gate
+    TH -- no --> N1
+    TH -- yes --> TY{"title_clue?"}:::gate
+    TY -- yes --> LLM["Worker writes the opening from the sanitized title<br/>then rechecks window, typing, pause and quiet hours"]:::step
+    TY -- no --> TPL["Template text for the trigger"]:::step
+    LLM --> UI2{"UI recheck passes?<br/>no chat turn, worker or dialog started,<br/>window unchanged, not a repeated sentence"}:::gate
+    TPL --> UI2
+    UI2 -- no --> N1
+    UI2 -- yes --> P["Buddy posts a normal chat message with its reason<br/>deadline nudges also offer plan, later or stop"]:::ui
+    P --> FBK["Student reaction<br/>replied, late reply, negative phrase or later,<br/>ignored for 15 active minutes, or unseen"]:::ui
+    FBK --> UPD["FeedbackLogger updates<br/>trigger_stats (Beta, decays 2% a day) or scene_arms<br/>two ignores in 7 days halve that trigger for 7 days<br/>unseen and title_clue silence are never penalized"]:::learn
+    UPD -. next evaluation .-> SC
+  end
+
+  SCUE["Scene cue from Figure 3.5(b)<br/>scene_change or scene_dwell"]:::cam
+  ECUE["Expression cue from Figure 3.5(b)<br/>text context only"]:::cam
+  SCUE -. candidate trigger .-> TR
+  ECUE -. text context only .-> C
+
+  classDef step fill:#fed7aa,stroke:#c2410c,stroke-width:2px,color:#431407
+  classDef gate fill:#fef08a,stroke:#a16207,stroke-width:2px,color:#422006
+  classDef bad fill:#fecaca,stroke:#b91c1c,stroke-width:2px,color:#450a0a
+  classDef ui fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+  classDef learn fill:#99f6e4,stroke:#0f766e,stroke-width:2px,color:#042f2e
+  classDef cam fill:#bbf7d0,stroke:#15803d,stroke-width:2px,color:#052e16
+  style A fill:#fff7ed,stroke:#c2410c,stroke-width:2px

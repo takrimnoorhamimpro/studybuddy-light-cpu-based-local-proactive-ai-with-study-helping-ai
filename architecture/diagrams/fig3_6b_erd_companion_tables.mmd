@@ -1,0 +1,114 @@
+erDiagram
+  personal_nodes {
+    text id PK
+    text label
+    text kind
+    text status
+    int consented
+    text evidence
+    real created_ts
+    real updated_ts
+    real importance
+    real last_used_ts
+    int use_count
+    text sensitivity
+    text source
+    real expires_ts
+  }
+  personal_edges {
+    text id PK
+    text source_id FK
+    text target_id FK
+    text relation
+    text evidence
+    real created_ts
+  }
+  candidate_queue {
+    text node_id PK, FK
+    real queued_ts
+    int deferrals
+    real last_prompted_ts
+  }
+  consent_ledger {
+    int id PK
+    real ts
+    text scope
+    int granted
+    text note
+  }
+  companion_followups {
+    text id PK
+    real due_ts
+    text kind
+    text payload
+    text status
+    real created_ts
+    real delivered_ts
+    real claimed_ts
+  }
+  companion_settings {
+    text key PK
+    text value
+  }
+  companion_events {
+    int id PK
+    real ts
+    text kind
+    text trigger
+    text reason
+    text meta
+    text nudge_id
+  }
+  open_loops {
+    text id PK
+    text title
+    text kind
+    real due_ts
+    text status
+    int step
+    text node_id "logical ref"
+    text source
+    text ref_id
+    real created_ts
+    real last_surfaced_ts
+    int surfaced_count
+    real snoozed_until
+  }
+  rhythm_buckets {
+    int dow PK
+    int hour PK
+    text app_category PK
+    real minutes
+    int samples
+    real updated_ts
+  }
+  rhythm_days {
+    text day PK
+    real updated_ts
+  }
+  trigger_stats {
+    text trigger PK
+    int hour_bucket PK
+    real alpha
+    real beta
+    real updated_ts
+  }
+  mood_daily["mood_daily (Phase 3 stub)"] {
+    text day PK
+    real valence
+    int n
+  }
+  growth_log["growth_log (Phase 3 stub)"] {
+    int id PK
+    real ts
+    text field
+    text old
+    text new
+    text reason
+    int reverted
+  }
+
+  personal_nodes ||--o{ personal_edges : "source_id"
+  personal_nodes ||--o{ personal_edges : "target_id"
+  personal_nodes ||--o| candidate_queue : "node_id"
+  personal_nodes ||..o{ open_loops : "node_id"

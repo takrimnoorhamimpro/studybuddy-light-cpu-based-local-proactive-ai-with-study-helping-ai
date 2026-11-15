@@ -1,0 +1,54 @@
+erDiagram
+  scene_obs {
+    int id PK
+    real ts
+    text text
+  }
+  scene_clusters {
+    int id PK
+    text centroid
+    int n
+    real first_ts
+    real last_ts
+  }
+  scene_visits {
+    int id PK
+    int cluster_id "logical ref"
+    real start_ts
+    real dwell_s
+    int hour_bucket
+    text day
+  }
+  scene_arms {
+    int cluster_id PK "logical ref"
+    int hour_bucket PK
+    real alpha
+    real beta
+    real updated_ts
+  }
+  scene_arm_done {
+    text nudge_id PK
+  }
+  scene_terms {
+    int bucket PK
+    int df
+  }
+  scene_meta {
+    text key PK
+    text value
+  }
+  tool_events["tool_events (separate DB: logs/intelligence.sqlite3)"] {
+    int id PK
+    text tool_id
+    text tool_name
+    text source
+    text status
+    real started_at
+    real finished_at
+    int duration_ms
+    text summary
+    text error
+  }
+
+  scene_clusters ||..o{ scene_visits : "cluster_id"
+  scene_clusters ||..o{ scene_arms : "cluster_id"
